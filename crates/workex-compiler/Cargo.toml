@@ -1,0 +1,17 @@
+[package]
+name = "workex-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oxc_parser = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-native = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }

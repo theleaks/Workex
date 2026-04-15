@@ -1,0 +1,41 @@
+{
+  "iterations": 1000,
+  "test": "worker_compat_hello_ts",
+  "v8": {
+    "body": "Hello from Workex!",
+    "content_type": "text/plain",
+    "correct": true,
+    "iterations": 1000,
+    "latency": {
+      "mean_ns": 3870,
+      "p50_ns": 2600,
+      "p95_ns": 6600,
+      "p99_ns": 14100
+    },
+    "runtime": "v8",
+    "status": 200
+  },
+  "workers": {
+    "body": "Hello from Workex!",
+    "content_type": "text/plain",
+    "correct": true,
+    "iterations": 1000,
+    "latency": {
+      "mean_ns": 1131418,
+      "p50_ns": 1059000,
+      "p95_ns": 1647100,
+      "p99_ns": 2803700
+    },
+    "runtime": "workers",
+    "status": 200
+  },
+  "workex": {
+    "body": "Hello from Workex!",
+    "correct": true,
+    "latency_mean_ns": 125400,
+    "latency_p50_ns": 113700,
+    "latency_p95_ns": 168400,
+    "latency_p99_ns": 369000,
+    "status": 200
+  }
+}

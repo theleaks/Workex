@@ -1,0 +1,31 @@
+{
+  "benchmark": "10k_isolate_rss",
+  "comparison": {
+    "per_isolate_factor": 2.8449856341496784,
+    "rss_factor": 2.8449679014190625
+  },
+  "count": 10000,
+  "v8": {
+    "count": 10000,
+    "gc_available": true,
+    "heap_delta_bytes": 8708928,
+    "heap_delta_mb": "8.3",
+    "heap_per_context_bytes": 871,
+    "node_version": "v24.12.0",
+    "rss_after_bytes": 1928523776,
+    "rss_before_bytes": 57065472,
+    "rss_delta_bytes": 1871458304,
+    "rss_delta_mb": "1784.8",
+    "rss_per_context_bytes": 187146,
+    "rss_per_context_kb": "182.8",
+    "runtime": "v8"
+  },
+  "workex": {
+    "rss_after_bytes": 662274048,
+    "rss_before_bytes": 4460544,
+    "rss_delta_bytes": 657813504,
+    "rss_delta_mb": "627.3",
+    "rss_per_isolate_bytes": 65781,
+    "rss_per_isolate_kb": "64.2"
+  }
+}

@@ -1,0 +1,24 @@
+# Rust build output
+/target/
+
+# Node.js
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent instructions (project-specific, not source)
+AGENTS.md
+CLAUDE.md
+.claude/
+
+# Environment secrets
+.env
+.env.*

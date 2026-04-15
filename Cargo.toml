@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/workex-core",
+    "crates/workex-compiler",
+    "crates/workex-runtime",
+    "crates/workex-cli",
+    "crates/workex-bench",
+]
+resolver = "2"
+
+[workspace.dependencies]
+oxc_parser = "0.125"
+oxc_allocator = "0.125"
+oxc_ast = "0.125"
+oxc_span = "0.125"
+oxc_codegen = "0.125"
+cranelift-codegen = "0.116"
+cranelift-frontend = "0.116"
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-native = "0.116"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
+http-body-util = "0.1"
+boa_engine = "0.21"
+boa_gc = "0.21"

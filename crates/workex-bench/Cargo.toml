@@ -1,0 +1,28 @@
+[package]
+name = "workex-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "workex-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "rss-bench"
+path = "src/rss_bench.rs"
+
+[[bin]]
+name = "worker-test"
+path = "src/worker_test.rs"
+
+[dependencies]
+workex-core = { path = "../workex-core" }
+workex-compiler = { path = "../workex-compiler" }
+workex-runtime = { path = "../workex-runtime" }
+oxc_parser = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
