@@ -15,7 +15,7 @@ node_modules/
 Thumbs.db
 
 # Agent instructions (project-specific, not source)
-AGENTS.md
+AGENTS*.md
 CLAUDE.md
 .claude/
 
