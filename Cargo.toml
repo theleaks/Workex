@@ -8,6 +8,12 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/user/workex"
+
 [workspace.dependencies]
 oxc_parser = "0.125"
 oxc_allocator = "0.125"
@@ -28,5 +34,8 @@ bytes = "1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
 http-body-util = "0.1"
-boa_engine = "0.21"
-boa_gc = "0.21"
+rquickjs = { version = "0.9", features = ["classes", "properties", "parallel"] }
+sled = "0.34"
+rusqlite = { version = "0.31", features = ["bundled"] }
+toml = "0.8"
+reqwest = { version = "0.12", features = ["json", "blocking"] }

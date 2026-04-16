@@ -115,3 +115,46 @@ fn execute_method_routing_worker() {
     assert_eq!(post_resp.text().unwrap(), "created");
     assert_eq!(post_resp.status, 201);
 }
+
+#[test]
+fn execute_async_promise_worker() {
+    let source = r#"
+        export default {
+            async fetch(request) {
+                var data = await Promise.resolve({ ok: true, url: request.url });
+                return new Response(JSON.stringify(data), {
+                    headers: { "content-type": "application/json" }
+                });
+            }
+        };
+    "#;
+
+    let mut engine = WorkexEngine::new().unwrap();
+    let req = WorkexRequest::get("https://example.com/async");
+    let resp = engine.execute_worker(source, req).unwrap();
+
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.headers.get("content-type"), Some("application/json"));
+    let body: serde_json::Value = resp.json_body().unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["url"], "https://example.com/async");
+}
+
+#[test]
+fn execute_chained_promises_worker() {
+    let source = r#"
+        export default {
+            async fetch(request) {
+                var step1 = await Promise.resolve(10);
+                var step2 = await Promise.resolve(step1 * 2);
+                var step3 = await Promise.resolve(step2 + 5);
+                return new Response("result=" + step3);
+            }
+        };
+    "#;
+
+    let mut engine = WorkexEngine::new().unwrap();
+    let req = WorkexRequest::get("https://example.com/chain");
+    let resp = engine.execute_worker(source, req).unwrap();
+    assert_eq!(resp.text().unwrap(), "result=25");
+}

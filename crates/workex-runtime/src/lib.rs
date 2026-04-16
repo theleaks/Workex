@@ -10,4 +10,5 @@ pub mod kv;
 pub mod d1;
 pub mod env;
 pub mod fetch;
+pub mod fetch_bridge;
 pub mod engine;

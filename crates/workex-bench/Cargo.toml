@@ -1,7 +1,7 @@
 [package]
 name = "workex-bench"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "workex-bench"
@@ -14,6 +14,18 @@ path = "src/rss_bench.rs"
 [[bin]]
 name = "worker-test"
 path = "src/worker_test.rs"
+
+[[bin]]
+name = "rss-real-bench"
+path = "src/rss_real_bench.rs"
+
+[[bin]]
+name = "million-bench"
+path = "src/million_bench.rs"
+
+[[bin]]
+name = "unified-bench"
+path = "src/unified.rs"
 
 [dependencies]
 workex-core = { path = "../workex-core" }

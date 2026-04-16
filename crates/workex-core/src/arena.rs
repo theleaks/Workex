@@ -9,6 +9,9 @@ use std::alloc::Layout;
 /// Default initial chunk size: 64KB.
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
+/// Minimal chunk size for high-density isolates: 4KB.
+pub const MINIMAL_CHUNK_SIZE: usize = 4 * 1024;
+
 /// Maximum total arena size: 128MB.
 pub const MAX_ARENA_SIZE: usize = 128 * 1024 * 1024;
 
@@ -52,6 +55,11 @@ impl Arena {
     /// Create a new arena with the default 64KB initial size.
     pub fn default_size() -> Self {
         Self::new(DEFAULT_CHUNK_SIZE)
+    }
+
+    /// Create a minimal 4KB arena for high-density scenarios (1M+ isolates).
+    pub fn minimal() -> Self {
+        Self::new(MINIMAL_CHUNK_SIZE)
     }
 
     /// Allocate a value in the arena. Returns a mutable reference valid

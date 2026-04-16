@@ -4,6 +4,7 @@
 
 pub mod codegen;
 pub mod hir;
+pub mod hybrid;
 pub mod lower;
 
 use oxc_allocator::Allocator;

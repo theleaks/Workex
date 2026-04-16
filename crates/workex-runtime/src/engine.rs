@@ -1,293 +1,315 @@
-//! WorkexEngine: Boa-based JavaScript engine for executing Workers scripts.
+//! WorkexEngine: QuickJS-based JavaScript engine for executing Workers scripts.
 //!
-//! Registers `Response`, `Request`, `Headers` as global JS classes
-//! backed by our Rust implementations, then executes Worker source code.
+//! Uses rquickjs (QuickJS) for fast JS execution.
+//! Response/Request are JS-side objects whose properties are read back by Rust.
 
-use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::property::Attribute;
-use boa_engine::{
-    js_string, Context, JsArgs, JsData, JsNativeError, JsObject, JsResult, JsValue, Source,
-};
-use boa_gc::{Finalize, Trace};
+use rquickjs::{Context, Ctx, Object, Runtime, Value};
 
 use crate::headers::Headers;
 use crate::request::WorkexRequest;
 use crate::response::WorkexResponse;
 use bytes::Bytes;
 
-/// JS-side Response object backed by our Rust WorkexResponse.
-#[derive(Debug, Trace, Finalize, JsData)]
-pub struct JsResponse {
-    #[unsafe_ignore_trace]
-    pub body: String,
-    pub status: u16,
-    #[unsafe_ignore_trace]
-    pub headers: Vec<(String, String)>,
+/// JS polyfill: Response and Request constructors defined in pure JS.
+/// Properties are read back by Rust after execution.
+pub const WORKER_POLYFILL: &str = r#"
+function Response(body, init) {
+    this.__body = (body === undefined || body === null) ? "" : String(body);
+    this.__status = (init && init.status) ? init.status : 200;
+    this.__headers = (init && init.headers) ? init.headers : {};
+    this.__is_response = true;
 }
 
-impl Class for JsResponse {
-    const NAME: &'static str = "Response";
-    const LENGTH: usize = 1;
-
-    fn data_constructor(
-        _new_target: &JsValue,
-        args: &[JsValue],
-        context: &mut Context,
-    ) -> JsResult<Self> {
-        // new Response(body?, init?)
-        let body = args
-            .get_or_undefined(0)
-            .to_string(context)?
-            .to_std_string_escaped();
-
-        let mut status = 200u16;
-        let mut headers = Vec::new();
-
-        // Parse init object: { status, headers }
-        if let Some(init) = args.get(1) {
-            if let Some(obj) = init.as_object() {
-                // status
-                if let Ok(s) = obj.get(js_string!("status"), context) {
-                    if !s.is_undefined() && !s.is_null() {
-                        if let Ok(n) = s.to_number(context) {
-                            if !n.is_nan() && n > 0.0 {
-                                status = n as u16;
-                            }
-                        }
-                    }
-                }
-                // headers
-                if let Ok(h) = obj.get(js_string!("headers"), context) {
-                    if let Some(h_obj) = h.as_object() {
-                        // Iterate own properties
-                        let keys = h_obj.own_property_keys(context)?;
-                        for key in keys {
-                            if let Ok(val) = h_obj.get(key.clone(), context) {
-                                let k = key.to_string();
-                                let v = val.to_string(context)?.to_std_string_escaped();
-                                headers.push((k, v));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(JsResponse {
-            body,
-            status,
-            headers,
-        })
-    }
-
-    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
-        Ok(())
-    }
+function Request(url, init) {
+    this.url = url || "";
+    this.method = (init && init.method) ? init.method : "GET";
+    this.headers = (init && init.headers) ? init.headers : {};
 }
+"#;
 
-impl JsResponse {
-    /// Convert to our Rust WorkexResponse.
-    pub fn to_workex_response(&self) -> WorkexResponse {
-        let mut h = Headers::new();
-        for (k, v) in &self.headers {
-            h.set(k, v);
-        }
-        WorkexResponse::with_init(Bytes::from(self.body.clone()), self.status, h)
-    }
-}
-
-/// JS-side Request object backed by our Rust WorkexRequest.
-#[derive(Debug, Trace, Finalize, JsData)]
-pub struct JsRequest {
-    #[unsafe_ignore_trace]
-    pub method: String,
-    #[unsafe_ignore_trace]
-    pub url: String,
-}
-
-impl Class for JsRequest {
-    const NAME: &'static str = "Request";
-    const LENGTH: usize = 1;
-
-    fn data_constructor(
-        _new_target: &JsValue,
-        args: &[JsValue],
-        context: &mut Context,
-    ) -> JsResult<Self> {
-        let url = args
-            .get_or_undefined(0)
-            .to_string(context)?
-            .to_std_string_escaped();
-        Ok(JsRequest {
-            method: "GET".into(),
-            url,
-        })
-    }
-
-    fn object_constructor(
-        instance: &JsObject,
-        _args: &[JsValue],
-        context: &mut Context,
-    ) -> JsResult<()> {
-        let req = instance.downcast_ref::<JsRequest>().ok_or_else(|| {
-            JsNativeError::typ().with_message("invalid Request")
-        })?;
-        instance.set(js_string!("method"), js_string!(req.method.as_str()), false, context)?;
-        instance.set(js_string!("url"), js_string!(req.url.as_str()), false, context)?;
-        Ok(())
-    }
-
-    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
-        Ok(())
-    }
-}
-
-/// The Workex JS engine. Creates a Boa context with Workers globals registered.
+/// The Workex JS engine backed by QuickJS.
 pub struct WorkexEngine {
-    context: Context,
+    rt: Runtime,
+    ctx: Context,
 }
 
 impl WorkexEngine {
-    /// Create a new engine with Response and Request classes registered.
-    pub fn new() -> JsResult<Self> {
-        let mut context = Context::default();
+    /// Create a new engine with Response/Request polyfills registered.
+    pub fn new() -> anyhow::Result<Self> {
+        let rt = Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime error: {e}"))?;
+        let ctx = Context::full(&rt).map_err(|e| anyhow::anyhow!("QuickJS context error: {e}"))?;
 
-        // Register Response class
-        context.register_global_class::<JsResponse>()?;
+        // Register polyfills
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(WORKER_POLYFILL)
+                .map_err(|e| anyhow::anyhow!("polyfill error: {e}"))
+        })?;
 
-        // Register Request class
-        context.register_global_class::<JsRequest>()?;
-
-        Ok(WorkexEngine { context })
+        Ok(WorkexEngine { rt, ctx })
     }
 
     /// Execute a Worker script and call its fetch handler.
     ///
-    /// Accepts TypeScript or JavaScript. TS type annotations are stripped.
-    /// Supports `export default { fetch(request) { ... } }` syntax.
+    /// Accepts TypeScript or JavaScript. TS type annotations are stripped via oxc.
     pub fn execute_worker(
         &mut self,
         source: &str,
         request: WorkexRequest,
     ) -> anyhow::Result<WorkexResponse> {
-        // Strip TypeScript type annotations so Boa (JS-only) can parse it
-        let source = &strip_ts_annotations(source);
-        // Create request object in JS
-        let req_obj = JsRequest {
-            method: request.method.as_str().to_string(),
-            url: request.url.clone(),
-        };
+        let js_source = strip_ts_annotations(source);
 
-        // Register the request as a global
-        let js_req = JsObject::from_proto_and_data(
-            self.context.intrinsics().constructors().object().prototype(),
-            req_obj,
-        );
-        // Set properties on the JS object
-        js_req
-            .set(
-                js_string!("method"),
-                js_string!(request.method.as_str()),
-                false,
-                &mut self.context,
-            )
-            .map_err(|e| anyhow::anyhow!("set method: {e}"))?;
-        js_req
-            .set(
-                js_string!("url"),
-                js_string!(request.url.as_str()),
-                false,
-                &mut self.context,
-            )
-            .map_err(|e| anyhow::anyhow!("set url: {e}"))?;
-
-        let _ = self.context.register_global_property(
-            js_string!("__workex_request__"),
-            js_req,
-            Attribute::all(),
-        );
-
-        // Wrap ES module syntax into an evaluable expression.
-        // `export default { fetch(req) { ... } }` → extract the object.
-        let wrapped = if source.contains("export default") {
-            source
-                .replace("export default", "var __workex_mod__ =")
-                .replace("};", "};\n__workex_mod__.fetch(__workex_request__);")
+        // Wrap `export default { ... }` → evaluable JS
+        let wrapped = if js_source.contains("export default") {
+            let mut s = js_source.replace("export default", "var __workex_mod__ =");
+            s.push_str("\nvoid 0;");
+            s
         } else {
-            format!("var __workex_mod__ = {source};\n__workex_mod__.fetch(__workex_request__);")
+            format!("var __workex_mod__ = {js_source};\nvoid 0;")
         };
 
-        // Execute
-        let result = self
-            .context
-            .eval(Source::from_bytes(wrapped.as_bytes()))
-            .map_err(|e| anyhow::anyhow!("JS eval error: {e}"))?;
+        let method = request.method.as_str().to_string();
+        let url = request.url.clone();
 
-        // Run pending promise jobs (for async fetch handlers)
-        let _ = self.context.run_jobs();
+        self.ctx.with(|ctx| {
+            // Set request as global
+            let req_obj = Object::new(ctx.clone())
+                .map_err(|e| anyhow::anyhow!("request object: {e}"))?;
+            req_obj
+                .set("url", url.as_str())
+                .map_err(|e| anyhow::anyhow!("set url: {e}"))?;
+            req_obj
+                .set("method", method.as_str())
+                .map_err(|e| anyhow::anyhow!("set method: {e}"))?;
+            ctx.globals()
+                .set("__workex_request__", req_obj)
+                .map_err(|e| anyhow::anyhow!("set request: {e}"))?;
 
-        // Try to extract Response directly
-        if let Some(resp) = try_extract_response(&result) {
-            return Ok(resp);
-        }
+            // Eval the Worker module
+            ctx.eval::<(), _>(wrapped.as_bytes())
+                .map_err(|e| anyhow::anyhow!("JS eval error: {e}"))?;
 
-        // If result is a Promise, resolve it
-        if let Some(obj) = result.as_object() {
-            // Try to get the promise result via `.then()` — store in global
-            let _ = self.context.eval(Source::from_bytes(
-                b"var __workex_resolved__; void 0;",
-            ));
+            // Call fetch handler
+            let call_result: Value = ctx
+                .eval("__workex_mod__.fetch(__workex_request__)")
+                .map_err(|e| anyhow::anyhow!("fetch call error: {e}"))?;
 
-            // Use a simpler approach: call the fetch synchronously
-            // by evaluating the expression and checking __workex_result__
-            let resolve_script = format!(
-                "var __p__ = {};\
-                 if (__p__ && typeof __p__.then === 'function') {{\
-                   __p__.then(function(r) {{ __workex_resolved__ = r; }});\
-                 }} else {{\
-                   __workex_resolved__ = __p__;\
-                 }}",
-                "__workex_mod__.fetch(__workex_request__)"
-            );
+            // Resolve promise if async
+            while ctx.execute_pending_job() {}
 
-            let _ = self.context.eval(Source::from_bytes(resolve_script.as_bytes()));
-            let _ = self.context.run_jobs();
+            // Try direct Response first
+            if let Some(resp) = try_extract_response(&ctx, &call_result) {
+                return Ok(resp);
+            }
 
-            if let Ok(resolved) = self.context.eval(Source::from_bytes(b"__workex_resolved__")) {
-                if let Some(resp) = try_extract_response(&resolved) {
+            // If it was a Promise, resolve it
+            if call_result.is_object() {
+                // Set up promise resolution
+                ctx.eval::<(), _>(
+                    r#"
+                    var __workex_resolved__ = null;
+                    var __p__ = __workex_mod__.fetch(__workex_request__);
+                    if (__p__ && typeof __p__.then === 'function') {
+                        __p__.then(function(r) { __workex_resolved__ = r; });
+                    } else {
+                        __workex_resolved__ = __p__;
+                    }
+                    "#,
+                )
+                .map_err(|e| anyhow::anyhow!("promise resolve: {e}"))?;
+
+                // Execute promise jobs
+                while ctx.execute_pending_job() {}
+
+                let resolved: Value = ctx
+                    .eval("__workex_resolved__")
+                    .map_err(|e| anyhow::anyhow!("get resolved: {e}"))?;
+
+                if let Some(resp) = try_extract_response(&ctx, &resolved) {
                     return Ok(resp);
                 }
             }
-        }
 
-        // If result is a string, wrap it in a basic Response
-        if result.is_string() {
-            let s = result
-                .to_string(&mut self.context)
-                .map_err(|e| anyhow::anyhow!("to_string: {e}"))?
-                .to_std_string_escaped();
-            return Ok(WorkexResponse::new(s));
-        }
+            // Fallback: treat as string
+            if let Some(s) = call_result.as_string() {
+                let text = s
+                    .to_string()
+                    .map_err(|e| anyhow::anyhow!("string convert: {e}"))?;
+                return Ok(WorkexResponse::new(text));
+            }
 
-        anyhow::bail!("Worker fetch() did not return a Response object")
+            anyhow::bail!("Worker fetch() did not return a Response object")
+        })
     }
 }
 
-/// Try to extract a WorkexResponse from a JsValue.
-fn try_extract_response(value: &JsValue) -> Option<WorkexResponse> {
-    if let Some(obj) = value.as_object() {
-        if let Some(resp) = obj.downcast_ref::<JsResponse>() {
-            return Some(resp.to_workex_response());
+/// A pre-warmed engine: Worker source compiled once, context reused across requests.
+/// The hot path is just: set request globals → call fetch → read response.
+struct WarmContext {
+    rt: Runtime,
+    ctx: Context,
+}
+
+impl WarmContext {
+    /// Create a warm context: polyfill + fetch bridge + Worker source pre-compiled.
+    fn new(js_source: &str) -> anyhow::Result<Self> {
+        let rt = Runtime::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ctx = Context::full(&rt).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        ctx.with(|ctx| -> anyhow::Result<()> {
+            ctx.eval::<(), _>(WORKER_POLYFILL)
+                .map_err(|e| anyhow::anyhow!("polyfill: {e}"))?;
+            // Register real fetch() bridge
+            crate::fetch_bridge::register_fetch(&ctx)?;
+            ctx.eval::<(), _>(js_source.as_bytes())
+                .map_err(|e| anyhow::anyhow!("worker source: {e}"))?;
+            Ok(())
+        })?;
+
+        Ok(WarmContext { rt, ctx })
+    }
+
+    /// Execute a request on this pre-warmed context.
+    /// Only sets request, calls fetch, reads response — no source eval.
+    fn handle_request(&self, request: &WorkexRequest) -> anyhow::Result<WorkexResponse> {
+        self.ctx.with(|ctx| {
+            // Set request
+            let req_obj = Object::new(ctx.clone())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            req_obj.set("url", request.url.as_str()).map_err(|e| anyhow::anyhow!("{e}"))?;
+            req_obj.set("method", request.method.as_str()).map_err(|e| anyhow::anyhow!("{e}"))?;
+            ctx.globals().set("__workex_request__", req_obj)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // Call fetch — module already compiled
+            let result: Value = ctx.eval("__workex_mod__.fetch(__workex_request__)")
+                .map_err(|e| anyhow::anyhow!("fetch: {e}"))?;
+
+            while ctx.execute_pending_job() {}
+
+            // Direct response
+            if let Some(resp) = try_extract_response(&ctx, &result) {
+                return Ok(resp);
+            }
+
+            // Promise resolution
+            if result.is_object() {
+                ctx.eval::<(), _>(
+                    "var __workex_resolved__ = null;\
+                     var __p__ = __workex_mod__.fetch(__workex_request__);\
+                     if (__p__ && typeof __p__.then === 'function') { __p__.then(function(r) { __workex_resolved__ = r; }); }\
+                     else { __workex_resolved__ = __p__; }"
+                ).map_err(|e| anyhow::anyhow!("{e}"))?;
+                while ctx.execute_pending_job() {}
+
+                let resolved: Value = ctx.eval("__workex_resolved__")
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if let Some(resp) = try_extract_response(&ctx, &resolved) {
+                    return Ok(resp);
+                }
+            }
+
+            anyhow::bail!("fetch() did not return a Response")
+        })
+    }
+}
+
+/// Pool of pre-warmed QuickJS contexts for the same Worker script.
+///
+/// Worker source is compiled once. Each request takes a context from the pool,
+/// calls `fetch()`, and returns it. No re-parsing, no re-eval.
+pub struct WorkexEnginePool {
+    /// Pre-compiled JS source (TS stripped, export default wrapped).
+    compiled_source: String,
+    /// Idle warm contexts ready for requests.
+    pool: Vec<WarmContext>,
+    /// Max idle contexts.
+    max_idle: usize,
+}
+
+impl WorkexEnginePool {
+    /// Create a pool for a Worker script. Pre-warms `pool_size` contexts.
+    pub fn new(source: &str, pool_size: usize) -> anyhow::Result<Self> {
+        let js = prepare_source(source);
+        let mut pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            pool.push(WarmContext::new(&js)?);
+        }
+        Ok(WorkexEnginePool {
+            compiled_source: js,
+            pool,
+            max_idle: pool_size,
+        })
+    }
+
+    /// Handle a request using a pre-warmed context.
+    pub fn handle(&mut self, request: &WorkexRequest) -> anyhow::Result<WorkexResponse> {
+        let ctx = if let Some(c) = self.pool.pop() {
+            c
+        } else {
+            WarmContext::new(&self.compiled_source)?
+        };
+
+        let resp = ctx.handle_request(request);
+
+        // Return context to pool
+        if self.pool.len() < self.max_idle {
+            self.pool.push(ctx);
+        }
+
+        resp
+    }
+
+    /// Number of idle contexts.
+    pub fn idle_count(&self) -> usize {
+        self.pool.len()
+    }
+}
+
+/// Prepare Worker source: strip TS, wrap export default.
+fn prepare_source(source: &str) -> String {
+    let js = strip_ts_annotations(source);
+    if js.contains("export default") {
+        let mut s = js.replace("export default", "var __workex_mod__ =");
+        s.push_str("\nvoid 0;");
+        s
+    } else {
+        format!("var __workex_mod__ = {js};\nvoid 0;")
+    }
+}
+
+/// Extract a WorkexResponse from a JS value by reading __body, __status, __headers.
+fn try_extract_response(ctx: &Ctx<'_>, value: &Value<'_>) -> Option<WorkexResponse> {
+    let obj = value.as_object()?;
+
+    // Check __is_response flag
+    let is_resp: bool = obj.get("__is_response").ok()?;
+    if !is_resp {
+        return None;
+    }
+
+    let body: String = obj.get("__body").unwrap_or_default();
+    let status: u16 = obj.get::<_, u32>("__status").unwrap_or(200) as u16;
+
+    let mut headers = Headers::new();
+    if let Ok(h_obj) = obj.get::<_, Object>("__headers") {
+        let keys: rquickjs::object::ObjectKeysIter<std::string::String> = h_obj.keys();
+        for key_result in keys {
+            if let Ok(key) = key_result {
+                let val: std::string::String = h_obj.get(&*key).unwrap_or_default();
+                headers.set(&key, &val);
+            }
         }
     }
-    None
+
+    Some(WorkexResponse::with_init(
+        Bytes::from(body),
+        status,
+        headers,
+    ))
 }
 
 /// Strip TypeScript type annotations using oxc AST spans.
-/// Parses as TypeScript, identifies type annotation spans, removes them from source.
 fn strip_ts_annotations(source: &str) -> String {
-    use oxc_ast::ast::*;
-
     let allocator = oxc_allocator::Allocator::default();
     let source_type = oxc_span::SourceType::from_path("worker.ts").unwrap_or_default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
@@ -296,19 +318,17 @@ fn strip_ts_annotations(source: &str) -> String {
         return source.to_string();
     }
 
-    // Collect spans of type annotations to remove
+    // Collect type annotation spans to remove
     let mut remove_spans: Vec<(u32, u32)> = Vec::new();
-
     for stmt in &parsed.program.body {
         collect_type_spans(stmt, &mut remove_spans);
     }
 
-    // Sort spans and remove from source (in reverse to preserve offsets)
+    // Remove spans in reverse order
     remove_spans.sort_by_key(|&(start, _)| std::cmp::Reverse(start));
-
     let mut result = source.to_string();
     for (start, end) in remove_spans {
-        // Also remove the preceding `: ` or `: `
+        // Also remove preceding `: `
         let actual_start = if start >= 2 {
             let prefix = &source[start as usize - 2..start as usize];
             if prefix == ": " {
@@ -327,7 +347,6 @@ fn strip_ts_annotations(source: &str) -> String {
     result
 }
 
-/// Walk all statements and collect type annotation spans from functions.
 fn collect_type_spans(stmt: &oxc_ast::ast::Statement<'_>, spans: &mut Vec<(u32, u32)>) {
     match stmt {
         oxc_ast::ast::Statement::ExportDefaultDeclaration(export) => {
@@ -367,40 +386,31 @@ mod tests {
 
     #[test]
     fn basic_response_construction() {
-        let mut ctx = Context::default();
-        ctx.register_global_class::<JsResponse>().unwrap();
-
-        let result = ctx
-            .eval(Source::from_bytes(
-                b"new Response('hello', { status: 201 })",
-            ))
-            .unwrap();
-
-        let obj = result.as_object().unwrap();
-        let resp = obj.downcast_ref::<JsResponse>().unwrap();
-        assert_eq!(resp.body, "hello");
-        assert_eq!(resp.status, 201);
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(WORKER_POLYFILL).unwrap();
+            let val: Value = ctx
+                .eval(r#"new Response("hello", { status: 201 })"#)
+                .unwrap();
+            let resp = try_extract_response(&ctx, &val).unwrap();
+            assert_eq!(resp.text().unwrap(), "hello");
+            assert_eq!(resp.status, 201);
+        });
     }
 
     #[test]
     fn response_with_headers() {
-        let mut ctx = Context::default();
-        ctx.register_global_class::<JsResponse>().unwrap();
-
-        let result = ctx
-            .eval(Source::from_bytes(
-                b"new Response('ok', { headers: { 'content-type': 'text/plain' } })",
-            ))
-            .unwrap();
-
-        let obj = result.as_object().unwrap();
-        let resp = obj.downcast_ref::<JsResponse>().unwrap();
-        let workex_resp = resp.to_workex_response();
-        assert_eq!(workex_resp.text().unwrap(), "ok");
-        assert_eq!(
-            workex_resp.headers.get("content-type"),
-            Some("text/plain")
-        );
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(WORKER_POLYFILL).unwrap();
+            let val: Value = ctx
+                .eval(r#"new Response("ok", { headers: { "content-type": "text/plain" } })"#)
+                .unwrap();
+            let resp = try_extract_response(&ctx, &val).unwrap();
+            assert_eq!(resp.headers.get("content-type"), Some("text/plain"));
+        });
     }
 
     #[test]
@@ -414,17 +424,12 @@ mod tests {
                 }
             };
         "#;
-
         let mut engine = WorkexEngine::new().unwrap();
         let req = WorkexRequest::get("https://example.com/");
         let resp = engine.execute_worker(source, req).unwrap();
-
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text().unwrap(), "Hello from Workex!");
-        assert_eq!(
-            resp.headers.get("content-type"),
-            Some("text/plain")
-        );
+        assert_eq!(resp.headers.get("content-type"), Some("text/plain"));
     }
 
     #[test]
@@ -436,11 +441,9 @@ mod tests {
                 }
             };
         "#;
-
         let mut engine = WorkexEngine::new().unwrap();
         let req = WorkexRequest::get("https://api.example.com/test");
         let resp = engine.execute_worker(source, req).unwrap();
-
         assert_eq!(resp.text().unwrap(), "url=https://api.example.com/test");
     }
 
@@ -453,11 +456,91 @@ mod tests {
                 }
             };
         "#;
-
         let mut engine = WorkexEngine::new().unwrap();
         let req = WorkexRequest::post("https://example.com/data", "body");
         let resp = engine.execute_worker(source, req).unwrap();
-
         assert_eq!(resp.text().unwrap(), "method=POST");
+    }
+
+    // ── Pool tests ──
+
+    #[test]
+    fn pool_basic() {
+        let source = r#"
+            export default {
+                fetch(request) {
+                    return new Response("pooled:" + request.url);
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 3).unwrap();
+        assert_eq!(pool.idle_count(), 3);
+
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/a")).unwrap();
+        assert_eq!(resp.text().unwrap(), "pooled:https://x.com/a");
+        assert_eq!(pool.idle_count(), 3); // returned to pool
+    }
+
+    #[test]
+    fn pool_multiple_requests() {
+        let source = r#"
+            export default {
+                fetch(request) {
+                    return new Response("path=" + request.url);
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 2).unwrap();
+
+        for i in 0..100 {
+            let resp = pool.handle(&WorkexRequest::get(&format!("https://x.com/{i}"))).unwrap();
+            assert_eq!(resp.text().unwrap(), format!("path=https://x.com/{i}"));
+        }
+        assert_eq!(pool.idle_count(), 2);
+    }
+
+    #[test]
+    fn pool_async_worker() {
+        let source = r#"
+            export default {
+                async fetch(request) {
+                    var data = await Promise.resolve({ url: request.url });
+                    return new Response(JSON.stringify(data));
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 2).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/async")).unwrap();
+        let body: serde_json::Value = resp.json_body().unwrap();
+        assert_eq!(body["url"], "https://x.com/async");
+    }
+
+    #[test]
+    fn pool_with_headers() {
+        let source = r#"
+            export default {
+                fetch(request) {
+                    return new Response("ok", {
+                        status: 201,
+                        headers: { "x-custom": "value" }
+                    });
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 1).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.headers.get("x-custom"), Some("value"));
+    }
+
+    #[test]
+    fn pool_ts_source() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/workers/hello.ts"),
+        ).unwrap();
+        let mut pool = WorkexEnginePool::new(&source, 2).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        assert_eq!(resp.text().unwrap(), "Hello from Workex!");
+        assert_eq!(resp.status, 200);
     }
 }

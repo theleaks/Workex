@@ -14,7 +14,7 @@ use crate::arena::Arena;
 pub struct IsolateId(u64);
 
 impl IsolateId {
-    fn next() -> Self {
+    pub fn next() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         IsolateId(COUNTER.fetch_add(1, Ordering::Relaxed))
@@ -62,6 +62,16 @@ impl Isolate {
         Isolate {
             id: IsolateId::next(),
             arena: Arena::default_size(),
+            module,
+            env,
+        }
+    }
+
+    /// Create a minimal isolate with 4KB arena for high-density scenarios.
+    pub fn new_minimal(module: Arc<ModuleHandle>, env: IsolateEnv) -> Self {
+        Isolate {
+            id: IsolateId::next(),
+            arena: Arena::minimal(),
             module,
             env,
         }

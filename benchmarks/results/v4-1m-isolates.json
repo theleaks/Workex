@@ -1,0 +1,16 @@
+{
+  "arena_size_bytes": 4096,
+  "benchmark": "1m_isolates",
+  "count": 1000000,
+  "factor_vs_v8": "43.0",
+  "per_isolate_bytes": 4355,
+  "per_isolate_kb": 4,
+  "rss_after_bytes": 4359294976,
+  "rss_before_bytes": 3985408,
+  "rss_delta_bytes": 4355309568,
+  "rss_delta_gb": "4.06",
+  "rss_delta_mb": 4153,
+  "spawn_rate": "775615",
+  "spawn_time_ms": 1289,
+  "v8_extrapolated_gb": "174.5"
+}

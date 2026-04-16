@@ -27,14 +27,14 @@ impl Env {
     pub fn add_kv(&mut self, name: &str) -> &mut KvNamespace {
         self.kv
             .entry(name.to_string())
-            .or_insert_with(|| KvNamespace::new(name))
+            .or_insert_with(|| KvNamespace::in_memory(name))
     }
 
     /// Add a D1 database binding.
     pub fn add_d1(&mut self, name: &str) -> &mut D1Database {
         self.d1
             .entry(name.to_string())
-            .or_insert_with(|| D1Database::new(name))
+            .or_insert_with(|| D1Database::in_memory(name))
     }
 
     /// Add a secret binding.

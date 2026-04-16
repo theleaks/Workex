@@ -1,7 +1,7 @@
 [package]
 name = "workex-runtime"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
@@ -9,8 +9,10 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-boa_engine = { workspace = true }
-boa_gc = { workspace = true }
+rquickjs = { workspace = true }
+sled = { workspace = true }
+rusqlite = { workspace = true }
+reqwest = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
