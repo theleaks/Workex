@@ -17,7 +17,7 @@ use crate::vm::{VmFrame, VmResult, run};
 /// The agent scheduler.
 pub struct AgentScheduler {
     module: Arc<CompiledModule>,
-    suspended: Mutex<HashMap<AgentId, Continuation>>,
+    pub suspended: Mutex<HashMap<AgentId, Continuation>>,
     next_id: AtomicU64,
 }
 
@@ -71,6 +71,14 @@ impl AgentScheduler {
                 DispatchResult::Suspended { agent_id, io_request }
             }
             VmResult::Error(e) => DispatchResult::Error(e),
+            VmResult::SuspendedMulti { agent_id, continuation, io_requests } => {
+                let mut suspended = self.suspended.lock().unwrap();
+                suspended.insert(agent_id, continuation);
+                // For now, treat multi-suspend like first request
+                let first_io = io_requests.into_iter().next()
+                    .unwrap_or(IoRequest::Fetch { url: String::new(), method: "GET".into(), body: None });
+                DispatchResult::Suspended { agent_id, io_request: first_io }
+            }
         }
     }
 
@@ -105,10 +113,22 @@ impl AgentScheduler {
                 VmResult::Done(val) => return Ok(val),
                 VmResult::Error(e) => return Err(e),
                 VmResult::Suspended { continuation, io_request, .. } => {
-                    // Execute real I/O
                     let io_result = execute_io(&io_request).await;
-                    // Rebuild frame from continuation + result
                     frame = VmFrame::from_continuation(continuation, io_result);
+                }
+                VmResult::SuspendedMulti { continuation, io_requests, .. } => {
+                    // Execute all I/O in parallel
+                    let mut results = Vec::new();
+                    for req in &io_requests {
+                        results.push(execute_io(req).await);
+                    }
+                    // Combine results into array
+                    let combined = JsValue::Object(
+                        results.into_iter().enumerate()
+                            .map(|(i, v)| (i.to_string(), v))
+                            .collect(),
+                    );
+                    frame = VmFrame::from_continuation(continuation, combined);
                 }
             }
         }

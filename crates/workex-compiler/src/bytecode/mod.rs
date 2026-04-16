@@ -37,6 +37,14 @@ pub enum Instruction {
     Suspend { resume_id: u32, live_regs: u64, io_type: IoType },
     Resume { resume_id: u32 },
 
+    // Error handling
+    TryCatch { catch_offset: i16, error_reg: u8 },
+    EndTry,
+    Throw { val: u8 },
+
+    // Parallel I/O (Promise.all)
+    SuspendMulti { resume_id: u32, live_regs: u64, count: u8 },
+
     // Workers API primitives
     WxFetch { dst: u8, req: u8 },
     WxKvGet { dst: u8, binding: u8, key: u8 },
@@ -67,7 +75,7 @@ pub struct CompiledModule {
 }
 
 /// Minimal JS value for the bytecode VM.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum JsValue {
     Undefined,
     Null,

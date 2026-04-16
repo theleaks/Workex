@@ -39,6 +39,10 @@ path = "src/million_real_bench.rs"
 name = "continuation-bench"
 path = "src/continuation_bench.rs"
 
+[[bin]]
+name = "ten-million-bench"
+path = "src/ten_million_bench.rs"
+
 [dependencies]
 workex-core = { path = "../workex-core" }
 workex-compiler = { path = "../workex-compiler" }

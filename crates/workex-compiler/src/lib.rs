@@ -5,6 +5,7 @@
 pub mod bytecode;
 pub mod codegen;
 pub mod cps;
+pub mod emit;
 pub mod hir;
 pub mod hybrid;
 pub mod lower;
