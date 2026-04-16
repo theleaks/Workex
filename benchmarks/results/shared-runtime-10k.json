@@ -2,14 +2,14 @@
   "architecture": "1 QuickJS Runtime, 10K Contexts",
   "benchmark": "shared_runtime_10k",
   "factor_vs_v8": "3.1x",
-  "factor_vs_workers": "17.2x",
-  "v8_per_context_kb": 182.94921875,
-  "workers_per_worker_kb": 1004.3203125,
+  "factor_vs_workers": "12.1x",
+  "v8_per_context_kb": 182.9921875,
+  "workers_per_worker_kb": 706.3203125,
   "workex": {
-    "per_context_bytes": 59907,
+    "per_context_bytes": 59943,
     "per_context_kb": 58,
     "pool_size": 10000,
-    "rss_delta_bytes": 599072768,
+    "rss_delta_bytes": 599437312,
     "rss_delta_mb": 571
   }
 }

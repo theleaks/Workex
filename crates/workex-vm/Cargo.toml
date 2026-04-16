@@ -14,3 +14,4 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 sled = { workspace = true }
 bincode = { workspace = true }
+futures = { workspace = true }

@@ -198,10 +198,10 @@ mod tests {
             let scheduler = AgentScheduler::new(module.clone());
             let agent_id = scheduler.dispatch_and_suspend().unwrap();
 
-            // Get the continuation from scheduler
+            // Get the continuation from scheduler (slab uses index)
             let cont = {
                 let mut suspended = scheduler.suspended.lock().unwrap();
-                suspended.remove(&agent_id).unwrap()
+                suspended.remove(agent_id.0 as usize).unwrap()
             };
             let io = IoRequest::Fetch {
                 url: "https://api.openai.com".into(),
@@ -221,14 +221,15 @@ mod tests {
             assert_eq!(pending.len(), 1, "should find 1 hibernated agent");
 
             let scheduler2 = AgentScheduler::new(module.clone());
+            let mut agent_slot = 0;
             for h in &pending {
                 let cont = h.to_continuation();
-                scheduler2.suspended.lock().unwrap().insert(cont.agent_id, cont);
+                let mut slab = scheduler2.suspended.lock().unwrap();
+                agent_slot = slab.insert(cont);
             }
             assert_eq!(scheduler2.suspended_count(), 1);
 
-            // Resume with I/O result
-            let agent_id = AgentId(pending[0].agent_id);
+            let agent_id = AgentId(agent_slot as u64);
             let result = scheduler2.resume(agent_id, JsValue::Str("LLM response".into()));
             match result {
                 crate::scheduler::DispatchResult::Done(val) => {

@@ -14,3 +14,5 @@ pub mod fetch_bridge;
 pub mod engine;
 pub mod shared_runtime;
 pub mod registry;
+pub mod streaming;
+pub mod websocket;

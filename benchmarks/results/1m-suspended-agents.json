@@ -14,7 +14,7 @@
     "continuation_memory_bytes": 191000000,
     "continuation_memory_mb": "182.2",
     "per_agent_bytes": 191,
-    "rss_delta_mb": 543,
-    "suspend_time_ms": 1117
+    "rss_delta_mb": 474,
+    "suspend_time_ms": 880
   }
 }

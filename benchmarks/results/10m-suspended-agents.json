@@ -1,9 +1,9 @@
 {
   "agents": 10000000,
   "benchmark": "10m_suspended_agents",
-  "factor": "354",
-  "per_agent_bytes": 529,
-  "time_secs": 10.8269676,
+  "factor": "389",
+  "per_agent_bytes": 481,
+  "time_secs": 8.2506889,
   "v8_gb": "1745.2",
-  "workex_gb": "4.93"
+  "workex_gb": "4.48"
 }

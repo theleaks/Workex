@@ -12,12 +12,13 @@ use workex_runtime::kv::KvNamespace;
 use workex_runtime::d1::D1Database;
 
 use crate::continuation::{AgentId, Continuation, IoRequest};
+use crate::slab::ContinuationSlab;
 use crate::vm::{VmFrame, VmResult, run};
 
-/// The agent scheduler.
+/// The agent scheduler — manages millions of concurrent agents.
 pub struct AgentScheduler {
     module: Arc<CompiledModule>,
-    pub suspended: Mutex<HashMap<AgentId, Continuation>>,
+    pub suspended: Mutex<ContinuationSlab>,
     next_id: AtomicU64,
 }
 
@@ -25,7 +26,7 @@ impl AgentScheduler {
     pub fn new(module: Arc<CompiledModule>) -> Self {
         Self {
             module,
-            suspended: Mutex::new(HashMap::new()),
+            suspended: Mutex::new(ContinuationSlab::new()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -38,10 +39,10 @@ impl AgentScheduler {
     }
 
     /// Dispatch and immediately suspend (for benchmarking).
-    /// Returns the continuation if the agent suspended.
     pub fn dispatch_and_suspend(&self) -> Option<AgentId> {
         match self.dispatch() {
             DispatchResult::Suspended { agent_id, .. } => Some(agent_id),
+            DispatchResult::SuspendedMulti { agent_id, .. } => Some(agent_id),
             _ => None,
         }
     }
@@ -50,7 +51,7 @@ impl AgentScheduler {
     pub fn resume(&self, agent_id: AgentId, io_result: JsValue) -> DispatchResult {
         let cont = {
             let mut suspended = self.suspended.lock().unwrap();
-            suspended.remove(&agent_id)
+            suspended.remove(agent_id.0 as usize)
         };
 
         match cont {
@@ -65,41 +66,46 @@ impl AgentScheduler {
     fn execute(&self, frame: VmFrame) -> DispatchResult {
         match run(&self.module, frame) {
             VmResult::Done(val) => DispatchResult::Done(val),
-            VmResult::Suspended { agent_id, continuation, io_request } => {
-                let mut suspended = self.suspended.lock().unwrap();
-                suspended.insert(agent_id, continuation);
-                DispatchResult::Suspended { agent_id, io_request }
-            }
             VmResult::Error(e) => DispatchResult::Error(e),
-            VmResult::SuspendedMulti { agent_id, continuation, io_requests } => {
+            VmResult::Suspended { continuation, io_request, .. } => {
                 let mut suspended = self.suspended.lock().unwrap();
-                suspended.insert(agent_id, continuation);
-                // For now, treat multi-suspend like first request
-                let first_io = io_requests.into_iter().next()
-                    .unwrap_or(IoRequest::Fetch { url: String::new(), method: "GET".into(), body: None });
-                DispatchResult::Suspended { agent_id, io_request: first_io }
+                let slot = suspended.insert(continuation);
+                DispatchResult::Suspended { agent_id: AgentId(slot as u64), io_request }
+            }
+            VmResult::SuspendedMulti { continuation, io_requests, .. } => {
+                let mut suspended = self.suspended.lock().unwrap();
+                let slot = suspended.insert(continuation);
+                DispatchResult::SuspendedMulti { agent_id: AgentId(slot as u64), io_requests }
             }
         }
     }
 
-    /// Number of suspended agents.
     pub fn suspended_count(&self) -> usize {
         self.suspended.lock().unwrap().len()
     }
 
-    /// Total memory used by all continuations.
     pub fn suspended_memory_bytes(&self) -> usize {
-        self.suspended.lock().unwrap()
-            .values()
-            .map(|c| c.size_bytes())
-            .sum()
+        self.suspended.lock().unwrap().memory_bytes()
     }
 
-    /// Average continuation size.
+    /// Spawn N agents concurrently, run all to completion.
+    pub async fn dispatch_many(self: Arc<Self>, count: usize) -> Vec<Result<JsValue, String>> {
+        let mut handles = Vec::with_capacity(count);
+        for _ in 0..count {
+            let sched = self.clone();
+            handles.push(tokio::spawn(async move { sched.dispatch_full().await }));
+        }
+        futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.map_err(|e| e.to_string()).and_then(|r| r))
+            .collect()
+    }
+
     pub fn avg_continuation_bytes(&self) -> usize {
         let s = self.suspended.lock().unwrap();
         if s.is_empty() { return 0; }
-        s.values().map(|c| c.size_bytes()).sum::<usize>() / s.len()
+        s.memory_bytes() / s.len()
     }
 
     /// Full dispatch: run agent, execute real I/O on suspend, resume until done.
@@ -117,12 +123,11 @@ impl AgentScheduler {
                     frame = VmFrame::from_continuation(continuation, io_result);
                 }
                 VmResult::SuspendedMulti { continuation, io_requests, .. } => {
-                    // Execute all I/O in parallel
-                    let mut results = Vec::new();
-                    for req in &io_requests {
-                        results.push(execute_io(req).await);
-                    }
-                    // Combine results into array
+                    // FIX: ALL I/O ops run in parallel via join_all
+                    let futs: Vec<_> = io_requests.iter()
+                        .map(|req| execute_io(req))
+                        .collect();
+                    let results = futures::future::join_all(futs).await;
                     let combined = JsValue::Object(
                         results.into_iter().enumerate()
                             .map(|(i, v)| (i.to_string(), v))
@@ -200,6 +205,7 @@ async fn execute_io(request: &IoRequest) -> JsValue {
 pub enum DispatchResult {
     Done(JsValue),
     Suspended { agent_id: AgentId, io_request: IoRequest },
+    SuspendedMulti { agent_id: AgentId, io_requests: Vec<IoRequest> },
     Error(String),
 }
 
