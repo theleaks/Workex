@@ -2,7 +2,9 @@
 //!
 //! Pipeline: TypeScript source → oxc parse → HIR (typed) → Cranelift → native code.
 
+pub mod bytecode;
 pub mod codegen;
+pub mod cps;
 pub mod hir;
 pub mod hybrid;
 pub mod lower;

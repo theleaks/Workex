@@ -35,10 +35,15 @@ path = "src/shared_bench.rs"
 name = "million-real-bench"
 path = "src/million_real_bench.rs"
 
+[[bin]]
+name = "continuation-bench"
+path = "src/continuation_bench.rs"
+
 [dependencies]
 workex-core = { path = "../workex-core" }
 workex-compiler = { path = "../workex-compiler" }
 workex-runtime = { path = "../workex-runtime" }
+workex-vm = { path = "../workex-vm" }
 oxc_parser = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

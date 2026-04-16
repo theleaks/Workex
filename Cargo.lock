@@ -2687,6 +2687,7 @@ dependencies = [
  "workex-compiler",
  "workex-core",
  "workex-runtime",
+ "workex-vm",
 ]
 
 [[package]]
@@ -2751,6 +2752,20 @@ dependencies = [
  "serde_json",
  "sled",
  "tokio",
+]
+
+[[package]]
+name = "workex-vm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "workex-compiler",
+ "workex-core",
+ "workex-runtime",
 ]
 
 [[package]]

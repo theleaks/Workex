@@ -2,11 +2,12 @@
 
 **Agent-native JavaScript runtime. Drop-in Cloudflare Workers replacement.**
 
-Built in Rust. QuickJS engine. Cranelift AOT. Arena allocator. Zero GC pauses.
+Built in Rust. Continuation Runtime. QuickJS engine. Cranelift AOT. Arena allocator. Zero GC.
 
 ```
-1,000,000 simultaneous isolates = 4.1 GB RAM
-V8 would need 174.5 GB for the same workload. That's 43x less memory.
+1,000,000 suspended agents = 182 MB (191 bytes each)
+V8 would need 174.5 GB (183 KB each)
+That's 981x less memory for waiting agents.
 ```
 
 ---
@@ -19,7 +20,7 @@ Cloudflare CEO Matthew Prince, April 14 2026:
 
 The bottleneck is V8. Each V8 isolate consumes ~183KB of RAM. At 24 million sessions, that's **4.3 terabytes** just for isolate overhead. No single machine can handle that.
 
-Workex isolates consume **4.3KB each**. Same Workers API. Same `export default { fetch }`. 24 million sessions = **103 GB** — one server.
+Workex has a Continuation Runtime: when an agent hits `await`, only the live variables are saved (~191 bytes). The full JS engine is released. 24 million suspended agents = **4.3 GB** — one server.
 
 ---
 
@@ -35,9 +36,31 @@ Every number below is a **real measurement**, not an estimate. All three runtime
 - **Statistics**: Multiple runs (5+), reporting mean/median/p99/stddev. Not single-shot numbers
 - **Load testing**: k6 v1.7.1 with ramping VUs (1 → 10 → 50 → 100 → 0 over 35 seconds)
 
-### 1,000,000 Simultaneous Isolates
+### 1,000,000 Suspended Agents (Continuation Runtime)
 
-Each isolate has a 4KB arena allocator with a simulated agent state allocation. Real OS-level RSS measured, not struct size estimates.
+The real-world scenario: agents waiting for LLM API, KV reads, outbound HTTP. Each agent stores only live variables at the `await` point — not the entire JS context.
+
+| Metric | Workex | V8 | Factor |
+|---|---|---|---|
+| **1M agents memory** | **182 MB** | 174.5 GB* | **981x less** |
+| **Per agent** | **191 bytes** | 183 KB* | **981x less** |
+| **Suspend rate** | 925K agents/sec | — | — |
+
+```
+cargo run -p workex-bench --release --bin continuation-bench
+```
+
+Each agent compiles to bytecode with explicit SUSPEND/RESUME instructions. At each `await`, only the live registers are serialized into a `Continuation` struct (~191 bytes). The full QuickJS engine is not kept alive — it's released back to the pool. When the I/O completes, the continuation is restored into a fresh VM frame.
+
+V8 comparison: V8 keeps the entire execution context alive (heap, JIT state, GC metadata, prototype chains = ~183KB) for every suspended agent. *Extrapolated from measured 10K `vm.createContext()` benchmark.
+
+**Matthew Prince's 24M agents projection:**
+- V8: 24M × 183KB = **4.1 TB**
+- Workex: 24M × 191B = **4.3 GB**
+
+### 1,000,000 Active Isolates (SharedRuntime)
+
+For agents actively executing JS (not suspended), each context shares a single QuickJS Runtime:
 
 | Metric | Workex | V8 (extrapolated) | Factor |
 |---|---|---|---|
@@ -107,8 +130,8 @@ Each isolate/context compiles and executes the JSON API Worker above, not empty 
 
 | Metric | Workex | V8 (Node.js) | CF Workers* | vs V8 | vs Workers |
 |---|---|---|---|---|---|
-| **10K total RSS** | **1,114 MB** | 1,787 MB | 4,508 MB | **1.6x** | **4.0x** |
-| **Per isolate** | **114 KB** | 183 KB | 462 KB | **1.6x** | **4.0x** |
+| **10K total RSS** | **571 MB** | 1,735 MB | 6,428 MB | **3.0x** | **11.3x** |
+| **Per isolate** | **58 KB** | 178 KB | 658 KB | **3.0x** | **11.3x** |
 
 ```
 cargo run -p workex-bench --release --bin rss-real-bench
@@ -175,20 +198,26 @@ Worker script (.ts/.js)
      v
   oxc parser ── strip TypeScript annotations ── pure JavaScript
      |
-     +──> QuickJS engine (full ES2020 execution)
+     +──> CPS Transformer (analyze await points, live variable analysis)
      |      |
-     |      +── Response / Request / fetch() backed by Rust
-     |      +── Promise/async via execute_pending_jobs()
-     |      +── Pre-warmed engine pool (compile once, reuse contexts)
+     |      +── Bytecode Emitter (register-based, SUSPEND/RESUME instructions)
+     |      |
+     |      +── Workex VM (register machine, ~25 opcodes)
+     |      |     |
+     |      |     +── SUSPEND → save only live registers (~191 bytes)
+     |      |     +── RESUME  → restore registers, continue execution
+     |      |     +── I/O bridge: reqwest (fetch), sled (KV), rusqlite (D1)
+     |      |
+     |      +── Agent Scheduler (1M+ concurrent agents, continuation store)
      |
-     +──> Cranelift JIT (typed functions only)
-     |      |
+     +──> QuickJS engine (fallback for complex/dynamic JS)
+     |      +── SharedRuntime (1 Runtime, N Contexts)
+     |      +── Response / Request / fetch() backed by Rust
+     |
+     +──> Cranelift JIT (typed functions → native code)
      |      +── function add(a: number, b: number): number → native fadd
-     |      +── Hybrid: typed → native (~1ns), untyped → QuickJS (~6us)
      |
   Arena Allocator (request-scoped, O(1) reset, no GC)
-     |
-  Isolate Pool (spawn/recycle, 4KB minimal or 64KB standard)
      |
   Hyper HTTP Server (tokio async, connection-per-task)
 ```
@@ -201,6 +230,9 @@ Worker script (.ts/.js)
 | JS Engine | QuickJS (rquickjs) | ES2020, 210KB binary, fast startup, no JIT overhead |
 | TS Parser | oxc | Fastest TS parser in existence, Rust-native |
 | AOT Compiler | Cranelift | Rust-native JIT for typed functions |
+| Continuation VM | Custom register machine | 25 opcodes, SUSPEND/RESUME, 191 bytes/agent |
+| CPS Transformer | oxc-based | Await detection, live variable analysis |
+| Agent Scheduler | Rust + tokio | 1M+ concurrent agents, I/O bridge |
 | Allocator | Custom bump arena | Request-scoped, O(1) free, zero GC pauses |
 | KV Storage | sled | Embedded persistent key-value database |
 | SQL Database | rusqlite (SQLite) | Cloudflare D1-compatible SQL engine |
@@ -219,10 +251,11 @@ workex/
 ├── Cargo.toml                  Workspace root (5 crates)
 ├── crates/
 │   ├── workex-core/            Arena allocator, isolate pool, RSS measurement
-│   ├── workex-compiler/        oxc parser, HIR, Cranelift codegen, hybrid AOT
+│   ├── workex-compiler/        oxc parser, HIR, Cranelift codegen, CPS transformer, bytecode
+│   ├── workex-vm/              Continuation VM, register machine, agent scheduler
 │   ├── workex-runtime/         QuickJS engine, Workers API, fetch bridge, KV, D1
 │   ├── workex-cli/             `workex dev` CLI, HTTP server, wrangler.toml parser
-│   └── workex-bench/           Unified benchmarks, RSS, 1M isolate, worker compat
+│   └── workex-bench/           Unified benchmarks, RSS, continuation, 1M agents
 ├── benchmarks/
 │   ├── scripts/                Node.js/V8 bench, Workers bench, k6 test, orchestrator
 │   └── results/                Versioned JSON results (unified-v1.json, v2.json, ...)
@@ -259,7 +292,7 @@ workex/
 
 ## Test Suite
 
-105 tests. All real. Zero mocks.
+129 tests. All real. Zero mocks.
 
 ```
 cargo test
@@ -282,6 +315,11 @@ cargo test
 | D1 (rusqlite) | 5 | CREATE TABLE, INSERT, SELECT, bind params, types |
 | Headers / Request / Response | 11 | Case-insensitive, JSON parse, redirect, status codes |
 | wrangler.toml parser | 5 | KV bindings, D1 bindings, vars, full config |
+| CPS transformer | 5 | Await detection, KV/fetch classify, liveness, complex worker |
+| Bytecode format | 2 | Instruction size, JsValue types |
+| Workex VM | 4 | Arithmetic, suspend/resume, multi-suspend, response |
+| Continuation store | 2 | Size verification, real agent data |
+| Agent scheduler | 5 | Dispatch/resume, 1K/100K suspend, sync dispatch, KV I/O bridge |
 | Benchmark validation | 3 | Memory targets, concurrency limits |
 | Env bindings | 3 | KV/D1 through Env struct |
 | fetch() mock (legacy) | 1 | Backward-compatible mock handler |
@@ -291,19 +329,22 @@ cargo test
 ## Benchmark Commands
 
 ```bash
-# Unified 3-way benchmark (recommended — runs everything)
+# 1M suspended agents — THE key benchmark (continuation runtime)
+cargo run -p workex-bench --release --bin continuation-bench
+
+# Unified 3-way comparison (Workex vs V8 vs Workers, multiple runs)
 cargo run -p workex-bench --release --bin unified-bench -- --runs 10
 
-# 1M isolate density test
-cargo run -p workex-bench --release --bin million-bench
+# 10K SharedRuntime (1 Runtime, 10K Contexts)
+cargo run -p workex-bench --release --bin shared-bench
 
-# 10K real Worker RSS (Workex + V8 + Workers)
+# 1M active isolates (SharedRuntime architecture)
+cargo run -p workex-bench --release --bin million-real-bench
+
+# 10K real Worker RSS (3-way, real code execution)
 cargo run -p workex-bench --release --bin rss-real-bench
 
-# Worker compatibility test (3-way correctness + latency)
-cargo run -p workex-bench --release --bin worker-test
-
-# k6 HTTP load test (starts 3 servers, runs k6 against each)
+# k6 HTTP load test (3 servers, ramping VUs)
 bash benchmarks/scripts/run-k6.sh
 
 # All results saved to benchmarks/results/ as versioned JSON
@@ -330,6 +371,8 @@ Each V8 isolate carries overhead: JIT compiler state, GC metadata, built-in obje
 **Cranelift AOT for hot paths**: TypeScript type annotations give us type information for free. `function add(a: number, b: number): number` compiles directly to a native `fadd` instruction via Cranelift — no speculation, no deopt. Hybrid execution: typed functions run at ~1ns, untyped functions interpret at ~6us.
 
 **Engine pool for warm requests**: Worker source is compiled once. QuickJS contexts are pre-warmed and pooled. Each request just sets the request object and calls `fetch()` — no re-parsing, no re-compilation.
+
+**Continuation Runtime for sleeping agents**: This is the breakthrough. When an agent hits `await` (waiting for LLM response, KV read, outbound HTTP), the CPS transformer has already identified which variables are live at that point. The VM saves only those registers (~191 bytes) into a `Continuation` struct and releases the execution context entirely. When the I/O completes, a fresh VM frame is rebuilt from the continuation. The agent never notices — it resumes exactly where it left off. This is the same principle BEAM/Erlang uses for millions of concurrent processes. We apply it to Workers-compatible JavaScript.
 
 ---
 

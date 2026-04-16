@@ -5,6 +5,7 @@ members = [
     "crates/workex-runtime",
     "crates/workex-cli",
     "crates/workex-bench",
+    "crates/workex-vm",
 ]
 resolver = "2"
 
