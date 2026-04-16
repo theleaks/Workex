@@ -162,17 +162,22 @@ impl WarmContext {
             crate::fetch_bridge::register_fetch(&ctx)?;
             ctx.eval::<(), _>(js_source.as_bytes())
                 .map_err(|e| anyhow::anyhow!("worker source: {e}"))?;
-            // Pre-compile dispatch wrapper — parsed ONCE, called every request
+
+            // Inject Cranelift native functions for typed helpers
+            inject_native_functions(&ctx, js_source)?;
+
+            // Pre-compile dispatch wrapper — return sync result directly
             ctx.eval::<(), _>(r#"
                 var __workex_resolved__ = null;
                 function __workex_dispatch__(req) {
-                    __workex_resolved__ = null;
                     var r = __workex_mod__.fetch(req);
                     if (r && typeof r.then === 'function') {
+                        __workex_resolved__ = null;
                         r.then(function(v) { __workex_resolved__ = v; });
-                    } else {
-                        __workex_resolved__ = r;
+                        return null;
                     }
+                    __workex_resolved__ = r;
+                    return r;
                 }
             "#).map_err(|e| anyhow::anyhow!("dispatch init: {e}"))?;
             Ok(())
@@ -192,14 +197,19 @@ impl WarmContext {
             ctx.globals().set("__workex_request__", req_obj)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // HOT PATH: 38-char eval — dispatch wrapper compiled once in new()
-            ctx.eval::<(), _>(b"__workex_dispatch__(__workex_request__)")
+            // HOT PATH: dispatch returns sync result directly, async via global
+            let direct: Value = ctx.eval("__workex_dispatch__(__workex_request__)")
                 .map_err(|e| anyhow::anyhow!("fetch: {e}"))?;
 
             while ctx.execute_pending_job() {}
 
-            let resolved: Value = ctx.eval("__workex_resolved__")
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Sync → use direct return. Async → read from __workex_resolved__
+            let resolved = if !direct.is_null() && !direct.is_undefined() {
+                direct
+            } else {
+                ctx.globals().get::<_, Value>("__workex_resolved__")
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+            };
 
             try_extract_response(&ctx, &resolved)
                 .ok_or_else(|| anyhow::anyhow!("fetch() did not return a Response"))
@@ -257,6 +267,55 @@ impl WorkexEnginePool {
     pub fn idle_count(&self) -> usize {
         self.pool.len()
     }
+}
+
+/// Inject Cranelift-compiled native functions into JS context.
+/// Typed functions (`: number` params + return) get compiled to native and override JS.
+fn inject_native_functions(ctx: &rquickjs::Ctx<'_>, original_source: &str) -> anyhow::Result<()> {
+    use workex_compiler::hybrid::{analyze_worker, ExecutionStrategy};
+
+    let strategies = analyze_worker(original_source);
+
+    for strat in strategies {
+        if let ExecutionStrategy::Native(native_fn) = strat.strategy {
+            let fn_ptr = native_fn.ptr() as usize;
+            let param_count = strat.param_types.len();
+            let name = strat.name.clone();
+
+            // Create JS wrapper that calls native function pointer
+            let native_cb = rquickjs::Function::new(
+                ctx.clone(),
+                move |args: rquickjs::function::Rest<f64>| -> f64 {
+                    match param_count {
+                        0 => {
+                            let f: extern "C" fn() -> f64 = unsafe { std::mem::transmute(fn_ptr) };
+                            f()
+                        }
+                        1 => {
+                            let f: extern "C" fn(f64) -> f64 = unsafe { std::mem::transmute(fn_ptr) };
+                            f(args.0.first().copied().unwrap_or(0.0))
+                        }
+                        2 => {
+                            let f: extern "C" fn(f64, f64) -> f64 = unsafe { std::mem::transmute(fn_ptr) };
+                            f(
+                                args.0.first().copied().unwrap_or(0.0),
+                                args.0.get(1).copied().unwrap_or(0.0),
+                            )
+                        }
+                        _ => 0.0,
+                    }
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("native fn create: {e}"))?;
+
+            // Override the JS function with native version
+            ctx.globals()
+                .set(name.as_str(), native_cb)
+                .map_err(|e| anyhow::anyhow!("native fn inject {name}: {e}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Prepare Worker source: strip TS, wrap export default.
@@ -536,6 +595,42 @@ mod tests {
         let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
         assert_eq!(resp.text().unwrap(), "Hello from Workex!");
         assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn cranelift_native_fn_in_worker() {
+        let source = r#"
+            function add(a: number, b: number): number {
+                return a + b;
+            }
+            export default {
+                fetch(request) {
+                    var result = add(10, 32);
+                    return new Response(result.toString());
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 1).unwrap();
+        for _ in 0..10 { let _ = pool.handle(&WorkexRequest::get("https://x.com/")); }
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        assert_eq!(resp.text().unwrap(), "42");
+    }
+
+    #[test]
+    fn cranelift_mul_in_worker() {
+        let source = r#"
+            function mul(a: number, b: number): number {
+                return a * b;
+            }
+            export default {
+                fetch(request) {
+                    return new Response(mul(6, 7).toString());
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 1).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        assert_eq!(resp.text().unwrap(), "42");
     }
 
     #[test]

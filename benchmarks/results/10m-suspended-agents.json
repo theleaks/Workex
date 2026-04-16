@@ -3,7 +3,7 @@
   "benchmark": "10m_suspended_agents",
   "factor": "585",
   "per_agent_bytes": 320,
-  "time_secs": 8.9896957,
+  "time_secs": 8.9266467,
   "v8_gb": "1745.2",
   "workex_gb": "2.99"
 }

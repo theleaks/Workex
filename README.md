@@ -73,7 +73,7 @@ cargo run -p workex-bench --release --bin shared-bench
 | Metric | Workex | V8 | CF Workers | vs V8 | vs Workers |
 |---|---|---|---|---|---|
 | **Cold start** | 336 us | 255 us | 84.1 ms | 0.8x | **251x** |
-| **Warm exec** | **6.8 us** | 2.7 us | 1.27 ms | 0.4x | **188x** |
+| **Warm exec** | **6.3 us** | 2.7 us | 1.08 ms | 0.4x | **171x** |
 | **Compat** | PASS | PASS | PASS | | |
 
 ```
@@ -129,7 +129,7 @@ bash benchmarks/scripts/run-k6.sh
 
 ```bash
 cargo build --release      # Build
-cargo test                  # 164 tests
+cargo test                  # 166 tests
 bash demo.sh                # 5-minute demo
 workex dev                  # Dev server (reads wrangler.toml)
 workex dev --workerd-compat # workerd protocol compatible
@@ -191,12 +191,14 @@ Worker (.ts/.js)
 |---|---|---|
 | fetch() called twice | Silent data corruption | Single dispatch wrapper |
 | String clone per agent | 481→320 bytes at 10M | Arc\<str\> zero-copy |
-| 300-char eval per request | 13.5us warm exec | Pre-compiled dispatch (6.8us) |
+| 300-char eval per request | 13.5us warm exec | Pre-compiled dispatch (6.3us) |
 | worker_test cold start | 40us fake "warm" | Pool-based measurement (6.8us) |
+| No Cranelift in hot path | typed fns interpreted | Native inject → add(10,32)=42 native |
+| Extra eval for response | ~0.5us overhead | Direct return path for sync Workers |
 
 ---
 
-## Test Suite — 164 tests, 0 failures, 0 mocks
+## Test Suite — 166 tests, 0 failures, 0 mocks
 
 ```
 cargo test

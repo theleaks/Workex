@@ -2801,6 +2801,7 @@ dependencies = [
  "serde_json",
  "sled",
  "tokio",
+ "workex-compiler",
 ]
 
 [[package]]
