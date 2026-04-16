@@ -1,0 +1,20 @@
+{
+  "agents": 1000000,
+  "benchmark": "1m_suspended_agents",
+  "factor": "981",
+  "projection_24m": {
+    "v8_tb": "4.1",
+    "workex_gb": "4.3"
+  },
+  "v8": {
+    "per_agent_bytes": 187392,
+    "total_gb": "174.5"
+  },
+  "workex": {
+    "continuation_memory_bytes": 191000000,
+    "continuation_memory_mb": "182.2",
+    "per_agent_bytes": 191,
+    "rss_delta_mb": 543,
+    "suspend_time_ms": 1135
+  }
+}
