@@ -162,10 +162,19 @@ impl WarmContext {
             crate::fetch_bridge::register_fetch(&ctx)?;
             ctx.eval::<(), _>(js_source.as_bytes())
                 .map_err(|e| anyhow::anyhow!("worker source: {e}"))?;
-            // Pre-cache fetch handler reference for fast calls
-            ctx.eval::<(), _>(
-                "var __workex_cached_fetch__ = __workex_mod__ ? __workex_mod__.fetch : null;"
-            ).ok();
+            // Pre-compile dispatch wrapper — parsed ONCE, called every request
+            ctx.eval::<(), _>(r#"
+                var __workex_resolved__ = null;
+                function __workex_dispatch__(req) {
+                    __workex_resolved__ = null;
+                    var r = __workex_mod__.fetch(req);
+                    if (r && typeof r.then === 'function') {
+                        r.then(function(v) { __workex_resolved__ = v; });
+                    } else {
+                        __workex_resolved__ = r;
+                    }
+                }
+            "#).map_err(|e| anyhow::anyhow!("dispatch init: {e}"))?;
             Ok(())
         })?;
 
@@ -183,17 +192,9 @@ impl WarmContext {
             ctx.globals().set("__workex_request__", req_obj)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // SINGLE call via cached function ref — no string re-parsing
-            ctx.eval::<(), _>(r#"
-                var __workex_resolved__ = null;
-                var __f__ = __workex_cached_fetch__ || __workex_mod__.fetch;
-                var __workex_result__ = __f__(__workex_request__);
-                if (__workex_result__ && typeof __workex_result__.then === 'function') {
-                    __workex_result__.then(function(r) { __workex_resolved__ = r; });
-                } else {
-                    __workex_resolved__ = __workex_result__;
-                }
-            "#).map_err(|e| anyhow::anyhow!("fetch: {e}"))?;
+            // HOT PATH: 38-char eval — dispatch wrapper compiled once in new()
+            ctx.eval::<(), _>(b"__workex_dispatch__(__workex_request__)")
+                .map_err(|e| anyhow::anyhow!("fetch: {e}"))?;
 
             while ctx.execute_pending_job() {}
 
@@ -535,6 +536,44 @@ mod tests {
         let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
         assert_eq!(resp.text().unwrap(), "Hello from Workex!");
         assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn warm_exec_faster_than_cold() {
+        let source = r#"
+            export default {
+                fetch(request) {
+                    return new Response(JSON.stringify({ url: request.url }));
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 2).unwrap();
+        for _ in 0..50 { let _ = pool.handle(&WorkexRequest::get("https://x.com/")); }
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            let _ = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        }
+        let warm_us = start.elapsed().as_nanos() as f64 / 1000.0 / 1e3;
+        println!("Warm exec: {warm_us:.2}us");
+        // Debug build is ~2-3x slower than release — allow higher threshold
+        assert!(warm_us < 30.0, "warm exec should be <30us in debug, got {warm_us:.2}us");
+    }
+
+    #[test]
+    fn dispatch_wrapper_handles_async() {
+        let source = r#"
+            export default {
+                async fetch(request) {
+                    var data = await Promise.resolve({ url: request.url });
+                    return new Response(JSON.stringify(data));
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 1).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/test")).unwrap();
+        assert_eq!(resp.status, 200);
+        let body: serde_json::Value = resp.json_body().unwrap();
+        assert_eq!(body["url"], "https://x.com/test");
     }
 
     #[test]

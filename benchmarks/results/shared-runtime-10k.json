@@ -3,13 +3,13 @@
   "benchmark": "shared_runtime_10k",
   "factor_vs_v8": "3.1x",
   "factor_vs_workers": "5.7x",
-  "v8_per_context_kb": 182.9755859375,
-  "workers_per_worker_kb": 332.16015625,
+  "v8_per_context_kb": 182.7099609375,
+  "workers_per_worker_kb": 331.2001953125,
   "workex": {
-    "per_context_bytes": 59935,
+    "per_context_bytes": 59931,
     "per_context_kb": 58,
     "pool_size": 10000,
-    "rss_delta_bytes": 599351296,
+    "rss_delta_bytes": 599310336,
     "rss_delta_mb": 571
   }
 }

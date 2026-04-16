@@ -7,10 +7,10 @@
     "correct": true,
     "iterations": 1000,
     "latency": {
-      "mean_ns": 2320,
-      "p50_ns": 1900,
+      "mean_ns": 2708,
+      "p50_ns": 2000,
       "p95_ns": 4200,
-      "p99_ns": 11400
+      "p99_ns": 14600
     },
     "runtime": "v8",
     "status": 200
@@ -21,10 +21,10 @@
     "correct": true,
     "iterations": 1000,
     "latency": {
-      "mean_ns": 1222749,
-      "p50_ns": 1133000,
-      "p95_ns": 1754200,
-      "p99_ns": 3044700
+      "mean_ns": 1210525,
+      "p50_ns": 1108000,
+      "p95_ns": 1834200,
+      "p99_ns": 3200100
     },
     "runtime": "workers",
     "status": 200
@@ -32,10 +32,10 @@
   "workex": {
     "body": "Hello from Workex!",
     "correct": true,
-    "latency_mean_ns": 43143,
-    "latency_p50_ns": 40300,
-    "latency_p95_ns": 51800,
-    "latency_p99_ns": 124800,
+    "latency_mean_ns": 6937,
+    "latency_p50_ns": 6800,
+    "latency_p95_ns": 7300,
+    "latency_p99_ns": 7700,
     "status": 200
   }
 }

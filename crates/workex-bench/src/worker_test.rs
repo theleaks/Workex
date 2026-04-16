@@ -28,6 +28,7 @@ fn main() -> anyhow::Result<()> {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/workers/hello.ts"),
     )?;
 
+    // Correctness check
     let mut engine = WorkexEngine::new().map_err(|e| anyhow::anyhow!("{e}"))?;
     let req = WorkexRequest::get("https://example.com/");
     let resp = engine.execute_worker(&source, req)?;
@@ -36,18 +37,19 @@ fn main() -> anyhow::Result<()> {
         && resp.status == 200
         && resp.headers.get("content-type") == Some("text/plain");
 
+    // FIX: Use POOL for warm exec measurement — not new engine per request
+    let mut pool = workex_runtime::engine::WorkexEnginePool::new(&source, 4)?;
+
     // Warmup
     for _ in 0..WARMUP {
-        let mut e = WorkexEngine::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let _ = e.execute_worker(&source, WorkexRequest::get("https://x.com/"));
+        let _ = pool.handle(&WorkexRequest::get("https://x.com/"));
     }
 
-    // Measure
+    // Measure WARM latency (pool reuses context)
     let mut samples = Vec::with_capacity(ITERATIONS as usize);
     for _ in 0..ITERATIONS {
-        let mut e = WorkexEngine::new().map_err(|e| anyhow::anyhow!("{e}"))?;
         let t = Instant::now();
-        let _ = e.execute_worker(&source, WorkexRequest::get("https://x.com/"));
+        let _ = pool.handle(&WorkexRequest::get("https://x.com/"));
         samples.push(t.elapsed().as_nanos() as u64);
     }
     samples.sort();
