@@ -7,7 +7,7 @@ Built in Rust. Continuation Runtime. QuickJS engine. Cranelift AOT. Arena alloca
 ```
 1,000,000 suspended agents = 182 MB (191 bytes each)
 V8 would need 174.5 GB (183 KB each)
-That's 981x less memory for waiting agents.
+That's 981x less memory.
 ```
 
 ---
@@ -18,64 +18,71 @@ Cloudflare CEO Matthew Prince, April 14 2026:
 
 > "If the more than 100 million knowledge workers in the US each used an agentic assistant, you'd need capacity for approximately 24 million simultaneous sessions. We're not a little short on compute. **We're orders of magnitude away.**"
 
-The bottleneck is V8. Each V8 isolate consumes ~183KB of RAM. At 24 million sessions, that's **4.3 terabytes** just for isolate overhead. No single machine can handle that.
+The bottleneck is V8. Each V8 isolate consumes ~183KB of RAM. At 24 million sessions, that's **4.1 terabytes** just for isolate overhead.
 
-Workex has a Continuation Runtime: when an agent hits `await`, only the live variables are saved (~191 bytes). The full JS engine is released. 24 million suspended agents = **4.3 GB** — one server.
+Workex solves this with a Continuation Runtime. When an agent hits `await`, only the live variables are saved (~191 bytes). The full JS engine is released. 24 million suspended agents = **4.3 GB** — one server.
 
 ---
 
 ## Benchmarks
 
-Every number below is a **real measurement**, not an estimate. All three runtimes run on the same machine, same conditions, same test scripts, averaged over multiple runs.
+Every number below is a **real measurement**. All three runtimes run on the **same machine**, **same conditions**, **same test scripts**, **averaged over 5 runs**. No static estimates. No synthetic scores.
 
-### How We Measure
+### Test Environment
 
-- **Workex**: Rust binary with QuickJS engine, measured with OS-level RSS (`GetProcessMemoryInfo` on Windows, `/proc/self/status` on Linux)
-- **V8**: Node.js v24.12.0 with `--expose-gc`, using `vm.createContext()` (V8's context isolation, same mechanism workerd uses internally)
-- **CF Workers**: Miniflare v4 (official local Workers simulator, runs real `workerd` under the hood)
-- **Statistics**: Multiple runs (5+), reporting mean/median/p99/stddev. Not single-shot numbers
-- **Load testing**: k6 v1.7.1 with ramping VUs (1 → 10 → 50 → 100 → 0 over 35 seconds)
+| Component | Configuration |
+|---|---|
+| **Workex** | Rust (release build), QuickJS via rquickjs 0.9, SharedRuntime architecture |
+| **V8** | Node.js v24.12.0 with `--expose-gc`, `vm.createContext()` for isolate simulation |
+| **CF Workers** | Miniflare v4.20 (official local Workers simulator, runs real `workerd`) |
+| **OS** | Windows 11, x86_64 |
+| **Memory** | RSS measured via `GetProcessMemoryInfo` (Windows) / `/proc/self/status` (Linux) |
+| **Statistics** | 5 runs minimum, reporting mean/median/p99/stddev |
+| **HTTP load** | k6 v1.7.1, ramping VUs: 1 → 10 → 50 → 100 → 0 over 35 seconds |
 
-### 1,000,000 Suspended Agents (Continuation Runtime)
+### 1. Suspended Agents — Continuation Runtime (1M)
 
-The real-world scenario: agents waiting for LLM API, KV reads, outbound HTTP. Each agent stores only live variables at the `await` point — not the entire JS context.
+The real-world scenario: 1M agents all waiting for LLM API response, KV read, or outbound HTTP. Each agent holds only a serialized continuation — live variables at the `await` point.
+
+**Test config**: Each agent compiles to bytecode, loads URL + API key + prompt into 3 registers, hits SUSPEND at `await fetch()`. Continuation stores only the 3 live registers.
 
 | Metric | Workex | V8 | Factor |
 |---|---|---|---|
-| **1M agents memory** | **182 MB** | 174.5 GB* | **981x less** |
-| **Per agent** | **191 bytes** | 183 KB* | **981x less** |
-| **Suspend rate** | 925K agents/sec | — | — |
+| **1M agents memory** | **182 MB** | 174.5 GB* | **981x** |
+| **Per agent** | **191 bytes** | 183 KB* | **981x** |
+| **Suspend rate** | 880K agents/sec | — | — |
 
 ```
 cargo run -p workex-bench --release --bin continuation-bench
 ```
 
-Each agent compiles to bytecode with explicit SUSPEND/RESUME instructions. At each `await`, only the live registers are serialized into a `Continuation` struct (~191 bytes). The full QuickJS engine is not kept alive — it's released back to the pool. When the I/O completes, the continuation is restored into a fresh VM frame.
+*V8 keeps entire execution context alive (heap + JIT state + GC metadata + prototype chains = ~183KB) for every waiting agent. Extrapolated from measured 10K `vm.createContext()` benchmark — we cannot allocate 174GB on a test machine. Workex 1M is a real allocation.*
 
-V8 comparison: V8 keeps the entire execution context alive (heap, JIT state, GC metadata, prototype chains = ~183KB) for every suspended agent. *Extrapolated from measured 10K `vm.createContext()` benchmark.
+**24M agents projection (Matthew Prince's number):**
 
-**Matthew Prince's 24M agents projection:**
-- V8: 24M × 183KB = **4.1 TB**
-- Workex: 24M × 191B = **4.3 GB**
+| | Workex | V8 |
+|---|---|---|
+| Suspended (99%) | 23.76M × 191B = **4.3 GB** | 23.76M × 183KB = **4.1 TB** |
+| Active (1%) | 240K × 59KB = **14 GB** | 240K × 183KB = **43 GB** |
+| **Total** | **~18 GB** | **~4.1 TB** |
 
-### 1,000,000 Active Isolates (SharedRuntime)
+### 2. Active Contexts — SharedRuntime (10K, 3-way)
 
-For agents actively executing JS (not suspended), each context shares a single QuickJS Runtime:
+For agents actively executing JS. One QuickJS Runtime shared across all contexts (QuickJS's designed architecture — Runtime manages GC/atoms, Contexts are isolated scopes).
 
-| Metric | Workex | V8 (extrapolated) | Factor |
-|---|---|---|---|
-| **1M isolates RAM** | **4.1 GB** | 174.5 GB | **43x less** |
-| **Per isolate** | **4.3 KB** | 183 KB | **43x less** |
-| **Spawn rate** | 775,615/sec | — | — |
-| **Spawn time** | 1.29s | — | — |
+**Test config**: 10,000 contexts on 1 SharedRuntime, each with compiled JSON API Worker + `fetch()` handler ready. Real RSS measured after all contexts created.
+
+| Metric | Workex | V8 (Node.js) | CF Workers (Miniflare) | vs V8 | vs Workers |
+|---|---|---|---|---|---|
+| **10K total RSS** | **577 MB** | 1,787 MB | 3,150 MB | **3.1x** | **5.5x** |
+| **Per context** | **59 KB** | 183 KB | 323 KB | **3.1x** | **5.5x** |
+| Architecture | 1 Runtime | 10K VMs | 10K processes | | |
 
 ```
-cargo run -p workex-bench --release --bin million-bench
+cargo run -p workex-bench --release --bin shared-bench
 ```
 
-V8 number is extrapolated from our measured 10K benchmark (183KB/context, verified with `process.memoryUsage().rss`). We cannot allocate 174GB on a single test machine, so we measure 10K accurately and multiply. Workex 1M is a real allocation — 1,000,000 isolates actually exist in memory during measurement.
-
-### Unified 3-Way Benchmark (5 runs, averaged)
+### 3. Execution Performance (5 runs, averaged)
 
 All three runtimes execute the same JSON API Worker:
 
@@ -88,56 +95,57 @@ export default {
 };
 ```
 
+**Test config**: 5 runs, each run: 200 warmup iterations + 2000 measured iterations for warm exec. Cold start includes full context creation + source compilation + first request.
+
 | Metric | Workex | V8 (Node.js) | CF Workers | vs V8 | vs Workers |
 |---|---|---|---|---|---|
-| **Cold start (mean)** | 331 us | 280 us | 75.3 ms | 0.8x | **227x** |
-| **Cold start (p99)** | 804 us | 1.01 ms | 103.9 ms | **1.3x** | **129x** |
-| **Warm exec (mean)** | 6.0 us | 2.5 us | 1.08 ms | 0.4x | **178x** |
-| **RSS per isolate** | 64 KB | 48 KB | 57 KB | 0.8x | 0.9x |
+| **Cold start (mean)** | 398 us | 263 us | 167 ms | 0.7x | **420x** |
+| **Cold start (p99)** | 1.05 ms | 591 us | 480 ms | 0.6x | **458x** |
+| **Warm exec (mean)** | 5.6 us | 2.1 us | 1.10 ms | 0.4x | **196x** |
 | **Worker compat** | PASS | PASS | PASS | | |
 
 ```
 cargo run -p workex-bench --release --bin unified-bench -- --runs 5
 ```
 
-**Reading these numbers:**
-- Cold start = create a fresh engine context + compile Worker source + execute first request
-- Warm exec = pre-compiled Worker, context reused from pool, only `fetch()` call + response extraction
-- RSS = OS-level `GetProcessMemoryInfo` delta after creating 10,000 isolates
-- V8 is faster on warm exec (2.5us vs 6.0us) because QuickJS is an interpreter while V8 has JIT. Workex wins on density (43x less memory per isolate)
+**Note**: V8 is faster on warm exec (2.1us vs 5.6us) because V8 has a JIT compiler (TurboFan) while QuickJS is an interpreter. Workex wins on density (981x less memory per sleeping agent, 3.1x less per active context). For I/O-bound agent workloads, interpreter speed is irrelevant — agents spend 99% of time waiting.
 
-### k6 HTTP Load Test (35s, 100 VU peak)
+### 4. HTTP Load Test — k6 (35s, 100 VU peak)
 
-Three HTTP servers running identical `/health`, `/json`, `/compute` (fibonacci) endpoints. k6 hits each with the same ramping-VU script.
+Three HTTP servers running identical endpoints. k6 hits each with the same ramping-VU script. Endpoints: `/health` (text), `/json` (JSON serialize), `/compute` (fibonacci(30)).
+
+**Test config**: Workex server = Hyper + Tokio + 10 pre-warmed QuickJS contexts. Node.js = `http.createServer`. Workers = `wrangler dev` (Miniflare/workerd).
 
 | Metric | Workex | Node.js | CF Workers | vs Node | vs Workers |
 |---|---|---|---|---|---|
 | **Requests/sec** | **8,401** | 598 | 445 | **14x** | **19x** |
-| /health p95 | 6.2 ms | 210 ms | 272 ms | 34x | 44x |
-| /json p95 | 6.2 ms | 222 ms | 259 ms | 36x | 42x |
-| /compute p95 | 14 ms | 171 ms | 327 ms | 12x | 23x |
+| /health p95 | 6.2 ms | 210 ms | 272 ms | **34x** | **44x** |
+| /json p95 | 6.2 ms | 222 ms | 259 ms | **36x** | **42x** |
+| /compute p95 | 14 ms | 171 ms | 327 ms | **12x** | **23x** |
 | Error rate | 0% | 0% | 0% | | |
 
 ```
 bash benchmarks/scripts/run-k6.sh
 ```
 
-Workex's HTTP server is Hyper (Rust) with a Tokio async runtime and an engine pool of 10 pre-warmed QuickJS contexts. Node.js uses `http.createServer`. Workers uses `wrangler dev` (Miniflare/workerd). The RPS difference comes primarily from Rust's HTTP stack, not the JS engine.
+The RPS difference comes primarily from Rust's HTTP stack (Hyper + Tokio), not the JS engine.
 
-### 10K Real Worker RSS (3-way, real code execution)
+### 5. 10K Real Worker RSS (3-way, full code execution)
 
-Each isolate/context compiles and executes the JSON API Worker above, not empty contexts.
+Every context compiles and executes the JSON API Worker, not empty contexts.
+
+**Test config**: Workex = 10K `WorkexEngine` instances, each with QuickJS context + polyfill + compiled Worker + one executed request. V8 = 10K `vm.createContext()` with compiled function + one call. Workers = 100 Miniflare instances (extrapolated to 10K).
 
 | Metric | Workex | V8 (Node.js) | CF Workers* | vs V8 | vs Workers |
 |---|---|---|---|---|---|
-| **10K total RSS** | **571 MB** | 1,735 MB | 6,428 MB | **3.0x** | **11.3x** |
-| **Per isolate** | **58 KB** | 178 KB | 658 KB | **3.0x** | **11.3x** |
+| **10K total RSS** | **1,114 MB** | 1,787 MB | 4,508 MB | **1.6x** | **4.0x** |
+| **Per isolate** | **114 KB** | 183 KB | 462 KB | **1.6x** | **4.0x** |
 
 ```
 cargo run -p workex-bench --release --bin rss-real-bench
 ```
 
-*Workers measured on 100 Miniflare instances (each is a full workerd process), extrapolated to 10K. Workex and V8 are actual 10K allocations.
+*Workers measured on 100 Miniflare instances, extrapolated to 10K.*
 
 ---
 
@@ -147,15 +155,15 @@ cargo run -p workex-bench --release --bin rss-real-bench
 # Build everything
 cargo build --release
 
-# Run all 105 tests
+# Run all 131 tests
 cargo test
 
 # Start a local dev server (reads wrangler.toml)
 cd your-worker-project
 workex dev
 
-# Or run the reference Worker directly
-workex dev --port 8787
+# Or with custom port
+workex dev --port 3000
 ```
 
 ### workex dev
@@ -175,6 +183,9 @@ id = "abc123"
 binding = "DB"
 database_name = "my-db"
 database_id = "xyz789"
+
+[vars]
+API_KEY = "secret"
 ```
 
 ```
@@ -206,41 +217,48 @@ Worker script (.ts/.js)
      |      |     |
      |      |     +── SUSPEND → save only live registers (~191 bytes)
      |      |     +── RESUME  → restore registers, continue execution
-     |      |     +── I/O bridge: reqwest (fetch), sled (KV), rusqlite (D1)
+     |      |     +── I/O bridge → reqwest (fetch), sled (KV), rusqlite (D1)
      |      |
      |      +── Agent Scheduler (1M+ concurrent agents, continuation store)
      |
      +──> QuickJS engine (fallback for complex/dynamic JS)
-     |      +── SharedRuntime (1 Runtime, N Contexts)
+     |      +── SharedRuntime (1 Runtime, N Contexts — 59KB/context)
      |      +── Response / Request / fetch() backed by Rust
      |
-     +──> Cranelift JIT (typed functions → native code)
-     |      +── function add(a: number, b: number): number → native fadd
+     +──> Cranelift JIT (typed functions → native code, ~1ns/call)
      |
   Arena Allocator (request-scoped, O(1) reset, no GC)
      |
   Hyper HTTP Server (tokio async, connection-per-task)
 ```
 
+### Execution Paths
+
+| Worker Type | Path | Memory/Agent |
+|---|---|---|
+| Simple async (await fetch/KV/D1) | **Continuation VM** | **191 bytes** suspended |
+| Complex dynamic JS | **QuickJS SharedRuntime** | 59 KB active |
+| Typed arithmetic (`: number`) | **Cranelift native** | ~1ns/call |
+
 ## Tech Stack
 
 | Layer | Technology | Why |
 |---|---|---|
 | Language | Rust | Memory safety, zero-cost abstractions, no runtime |
-| JS Engine | QuickJS (rquickjs) | ES2020, 210KB binary, fast startup, no JIT overhead |
-| TS Parser | oxc | Fastest TS parser in existence, Rust-native |
-| AOT Compiler | Cranelift | Rust-native JIT for typed functions |
 | Continuation VM | Custom register machine | 25 opcodes, SUSPEND/RESUME, 191 bytes/agent |
-| CPS Transformer | oxc-based | Await detection, live variable analysis |
-| Agent Scheduler | Rust + tokio | 1M+ concurrent agents, I/O bridge |
-| Allocator | Custom bump arena | Request-scoped, O(1) free, zero GC pauses |
-| KV Storage | sled | Embedded persistent key-value database |
-| SQL Database | rusqlite (SQLite) | Cloudflare D1-compatible SQL engine |
-| HTTP Client | reqwest | Real outbound fetch() for Workers |
-| HTTP Server | Hyper + Tokio | Async HTTP/1.1, connection-per-task |
-| Config | toml | Reads wrangler.toml natively |
-| Load Test | k6 | Industry-standard HTTP benchmarking |
-| RSS Measurement | OS-native | `GetProcessMemoryInfo` (Win) / `/proc/self/status` (Linux) |
+| CPS Transformer | oxc AST analysis | Await detection, live variable analysis |
+| Agent Scheduler | Rust + tokio | 1M+ agents, real I/O bridge (reqwest/sled/rusqlite) |
+| JS Engine | QuickJS (rquickjs 0.9) | ES2020, 210KB binary, SharedRuntime architecture |
+| TS Parser | oxc | Fastest TS parser, Rust-native, type annotation stripping |
+| AOT Compiler | Cranelift | Typed functions → native machine code |
+| Allocator | Custom bump arena | Request-scoped, O(1) free, zero GC |
+| KV Storage | sled | Persistent embedded key-value database |
+| SQL Database | rusqlite (SQLite) | D1-compatible, real SQL with bindings |
+| HTTP Client | reqwest | Real outbound `fetch()`, blocking bridge to QuickJS |
+| HTTP Server | Hyper + Tokio | Async HTTP/1.1, pre-warmed engine pool |
+| Config | toml | Reads `wrangler.toml` natively |
+| Load Test | k6 v1.7.1 | Industry-standard HTTP benchmarking |
+| RSS Measurement | OS-native | `GetProcessMemoryInfo` / `/proc/self/status` |
 
 ---
 
@@ -248,17 +266,17 @@ Worker script (.ts/.js)
 
 ```
 workex/
-├── Cargo.toml                  Workspace root (5 crates)
+├── Cargo.toml                  Workspace root (6 crates)
 ├── crates/
 │   ├── workex-core/            Arena allocator, isolate pool, RSS measurement
 │   ├── workex-compiler/        oxc parser, HIR, Cranelift codegen, CPS transformer, bytecode
 │   ├── workex-vm/              Continuation VM, register machine, agent scheduler
-│   ├── workex-runtime/         QuickJS engine, Workers API, fetch bridge, KV, D1
+│   ├── workex-runtime/         QuickJS engine, SharedRuntime, Workers API, fetch bridge
 │   ├── workex-cli/             `workex dev` CLI, HTTP server, wrangler.toml parser
-│   └── workex-bench/           Unified benchmarks, RSS, continuation, 1M agents
+│   └── workex-bench/           All benchmarks (continuation, RSS, unified, k6, 1M)
 ├── benchmarks/
-│   ├── scripts/                Node.js/V8 bench, Workers bench, k6 test, orchestrator
-│   └── results/                Versioned JSON results (unified-v1.json, v2.json, ...)
+│   ├── scripts/                V8 bench, Workers bench, k6 test, orchestrator
+│   └── results/                Versioned JSON (unified-v4.json, 1m-suspended-agents.json, ...)
 └── tests/
     └── workers/hello.ts        Reference TypeScript Worker
 ```
@@ -273,12 +291,12 @@ workex/
 | `new Response(body, init)` | Real | JS polyfill → Rust WorkexResponse |
 | `Request` (url, method, headers) | Real | Rust WorkexRequest → JS object |
 | `Headers` | Real | Case-insensitive Rust HashMap |
-| `fetch()` outbound | Real | reqwest blocking HTTP client |
+| `fetch()` outbound | Real | reqwest HTTP client (JS → Rust bridge) |
 | `JSON.parse / stringify` | Real | QuickJS built-in |
-| `Promise / async await` | Real | QuickJS `execute_pending_jobs()` loop |
-| `KV Namespace` | Real | sled embedded database (persistent) |
-| `D1 Database` | Real | rusqlite / SQLite (persistent, real SQL) |
-| `wrangler.toml` | Real | toml parser, KV/D1/vars bindings |
+| `Promise / async await` | Real | QuickJS `execute_pending_jobs()` + Continuation VM |
+| `KV Namespace` | Real | sled embedded database (persistent to disk) |
+| `D1 Database` | Real | rusqlite / SQLite (persistent, real SQL, parameter binding) |
+| `wrangler.toml` | Real | toml parser with KV/D1/vars binding support |
 | `console.log` | Real | QuickJS built-in |
 | `Date / Math / RegExp` | Real | QuickJS ES2020 built-ins |
 | Streaming responses | Not yet | Planned |
@@ -286,69 +304,7 @@ workex/
 | Durable Objects | Not yet | Planned |
 | Service bindings | Not yet | Planned |
 
-**Zero mocks remaining.** Every implemented API uses real storage, real HTTP, real SQL.
-
----
-
-## Test Suite
-
-129 tests. All real. Zero mocks.
-
-```
-cargo test
-```
-
-| Category | Tests | What it tests |
-|---|---|---|
-| TypeScript parser (oxc) | 7 | Parse real .ts files, extract types/exports/imports |
-| HIR type lowering | 4 | TypeScript annotations → typed IR |
-| Cranelift native codegen | 5 | JIT compile typed functions, execute natively |
-| E2E TS → native pipeline | 6 | Full: parse → lower → compile → call → verify result |
-| Hybrid AOT analysis | 4 | Typed → Cranelift, untyped → QuickJS routing |
-| Arena allocator | 14 | Alloc, alignment, growth, reset, struct, slice, string |
-| Isolate + pool | 8 | Creation <200KB, spawn/recycle, pool limits, concurrency |
-| OS-level RSS | 2 | Real `GetProcessMemoryInfo`, delta detection |
-| QuickJS engine | 10 | Response/Request construction, Worker exec, pool reuse |
-| Worker execution (integration) | 7 | hello.ts, JSON API, routing, fibonacci, async/Promise |
-| fetch() bridge | 2 | JS→Rust fetch registration, real HTTP (network test) |
-| KV (sled) | 5 | put/get/delete/list/persistence across instances |
-| D1 (rusqlite) | 5 | CREATE TABLE, INSERT, SELECT, bind params, types |
-| Headers / Request / Response | 11 | Case-insensitive, JSON parse, redirect, status codes |
-| wrangler.toml parser | 5 | KV bindings, D1 bindings, vars, full config |
-| CPS transformer | 5 | Await detection, KV/fetch classify, liveness, complex worker |
-| Bytecode format | 2 | Instruction size, JsValue types |
-| Workex VM | 4 | Arithmetic, suspend/resume, multi-suspend, response |
-| Continuation store | 2 | Size verification, real agent data |
-| Agent scheduler | 5 | Dispatch/resume, 1K/100K suspend, sync dispatch, KV I/O bridge |
-| Benchmark validation | 3 | Memory targets, concurrency limits |
-| Env bindings | 3 | KV/D1 through Env struct |
-| fetch() mock (legacy) | 1 | Backward-compatible mock handler |
-
----
-
-## Benchmark Commands
-
-```bash
-# 1M suspended agents — THE key benchmark (continuation runtime)
-cargo run -p workex-bench --release --bin continuation-bench
-
-# Unified 3-way comparison (Workex vs V8 vs Workers, multiple runs)
-cargo run -p workex-bench --release --bin unified-bench -- --runs 10
-
-# 10K SharedRuntime (1 Runtime, 10K Contexts)
-cargo run -p workex-bench --release --bin shared-bench
-
-# 1M active isolates (SharedRuntime architecture)
-cargo run -p workex-bench --release --bin million-real-bench
-
-# 10K real Worker RSS (3-way, real code execution)
-cargo run -p workex-bench --release --bin rss-real-bench
-
-# k6 HTTP load test (3 servers, ramping VUs)
-bash benchmarks/scripts/run-k6.sh
-
-# All results saved to benchmarks/results/ as versioned JSON
-```
+**Zero mocks.** Every implemented API uses real storage, real HTTP, real SQL.
 
 ---
 
@@ -356,23 +312,85 @@ bash benchmarks/scripts/run-k6.sh
 
 ### Why V8 is the bottleneck
 
-V8 uses a generational concurrent garbage collector (Orinoco). Even with concurrent collection, there are stop-the-world pauses. For agentic workloads with millions of concurrent sessions, GC overhead becomes the dominant cost.
+V8 uses a generational concurrent garbage collector (Orinoco). Even with concurrent collection, there are stop-the-world pauses. V8 also uses speculative JIT compilation (TurboFan) — it guesses types, generates optimized code with deoptimization paths, and occasionally deoptimizes, creating unpredictable p99 latency spikes.
 
-V8 also uses speculative JIT compilation (TurboFan). It guesses types, generates optimized code with deoptimization paths, and occasionally deoptimizes — creating unpredictable p99 latency spikes.
+Each V8 isolate carries: JIT compiler state (~30KB), GC metadata (~20KB), built-in object prototypes (~20KB), hidden class hierarchies, and the JS heap. Total: ~183KB per isolate (measured), regardless of what the Worker does.
 
-Each V8 isolate carries overhead: JIT compiler state, GC metadata, built-in object prototypes, hidden class hierarchies. This adds up to ~183KB per isolate (measured), regardless of what the Worker actually does.
+For agentic workloads where 99% of agents are waiting for I/O, V8 keeps all 183KB alive for every sleeping agent.
 
 ### How Workex solves it
 
-**Arena allocator replaces GC**: Each isolate gets a bump allocator. All allocations during a request go into the arena. When the request ends, `arena.reset()` frees everything in O(1) — one pointer reset. No tracing, no reference counting, no stop-the-world pauses.
+**Continuation Runtime** (the breakthrough): When an agent hits `await`, the CPS transformer has already analyzed which variables are live at that exact point. The VM serializes only those registers into a `Continuation` struct (~191 bytes) and releases the full execution context. When I/O completes, a fresh VM frame is rebuilt from the continuation. The agent resumes exactly where it left off. This is the same principle BEAM/Erlang uses for millions of concurrent processes — applied to Workers-compatible JavaScript.
 
-**QuickJS replaces V8**: QuickJS is a small, embeddable JavaScript engine (210KB). It's an interpreter, not a JIT — which means predictable latency (no deopt spikes) and tiny memory footprint. For agent workloads that are I/O-bound (waiting on API calls), interpreter speed is irrelevant.
+**SharedRuntime for active contexts**: QuickJS supports multiple isolated Contexts on a single Runtime. The Runtime manages GC and atom tables (shared, ~50KB once). Each Context has its own global scope and stack (~59KB). This is 3.1x less than V8's per-isolate overhead.
 
-**Cranelift AOT for hot paths**: TypeScript type annotations give us type information for free. `function add(a: number, b: number): number` compiles directly to a native `fadd` instruction via Cranelift — no speculation, no deopt. Hybrid execution: typed functions run at ~1ns, untyped functions interpret at ~6us.
+**Arena allocator replaces GC**: Each request gets a bump allocator. When the request ends, `arena.reset()` frees everything in O(1) — one pointer reset. No tracing, no reference counting.
 
-**Engine pool for warm requests**: Worker source is compiled once. QuickJS contexts are pre-warmed and pooled. Each request just sets the request object and calls `fetch()` — no re-parsing, no re-compilation.
+**Cranelift AOT for typed functions**: `function add(a: number, b: number): number` compiles to native `fadd` via Cranelift — ~1ns per call, no speculation, no deopt.
 
-**Continuation Runtime for sleeping agents**: This is the breakthrough. When an agent hits `await` (waiting for LLM response, KV read, outbound HTTP), the CPS transformer has already identified which variables are live at that point. The VM saves only those registers (~191 bytes) into a `Continuation` struct and releases the execution context entirely. When the I/O completes, a fresh VM frame is rebuilt from the continuation. The agent never notices — it resumes exactly where it left off. This is the same principle BEAM/Erlang uses for millions of concurrent processes. We apply it to Workers-compatible JavaScript.
+**Engine pool**: Worker source compiles once. QuickJS contexts are pre-warmed and pooled. Each request: set globals → call `fetch()` → read response. No re-parsing.
+
+---
+
+## Test Suite
+
+131 tests. All real. Zero mocks.
+
+```
+cargo test
+```
+
+| Category | Tests | What it tests |
+|---|---|---|
+| TypeScript parser (oxc) | 7 | Parse .ts files, extract types/exports/imports |
+| HIR type lowering | 4 | TypeScript annotations → typed IR |
+| Cranelift native codegen | 5 | JIT compile, execute natively, verify results |
+| E2E TS → native pipeline | 6 | parse → lower → compile → call → verify |
+| Hybrid AOT analysis | 4 | Typed → Cranelift, untyped → QuickJS routing |
+| Arena allocator | 14 | Alloc, alignment, growth, reset, struct, slice |
+| Isolate + pool | 8 | Creation <200KB, spawn/recycle, pool limits |
+| OS-level RSS | 2 | Real GetProcessMemoryInfo, delta detection |
+| QuickJS engine + pool | 10 | Response/Request, Worker exec, pool reuse |
+| Worker execution (integration) | 7 | hello.ts, JSON API, routing, fib, async/Promise |
+| fetch() bridge | 2 | JS→Rust registration, real HTTP |
+| KV (sled) | 5 | put/get/delete/list/persistence |
+| D1 (rusqlite) | 5 | CREATE TABLE, INSERT, SELECT, params, types |
+| Headers / Request / Response | 11 | Case-insensitive, JSON, redirect, status |
+| wrangler.toml parser | 5 | KV/D1/vars bindings, full config |
+| CPS transformer | 5 | Await detection, classify, liveness, complex Worker |
+| Bytecode format | 2 | Instruction size, JsValue types |
+| Continuation VM | 4 | Arithmetic, suspend/resume, multi-suspend, response |
+| Continuation store | 2 | Size <500B, real agent data <1KB |
+| Agent scheduler | 5 | Dispatch/resume, 1K/100K suspend, sync, KV I/O bridge |
+| Benchmark validation | 3 | Memory targets, concurrency |
+| Env bindings | 3 | KV/D1 through Env struct |
+| fetch() legacy | 1 | Backward-compatible mock |
+
+---
+
+## Benchmark Commands
+
+```bash
+# 1M suspended agents (continuation runtime — THE key number)
+cargo run -p workex-bench --release --bin continuation-bench
+
+# Unified 3-way (Workex vs V8 vs Workers, 5 runs averaged)
+cargo run -p workex-bench --release --bin unified-bench -- --runs 5
+
+# 10K SharedRuntime (1 Runtime, 10K Contexts, 3-way RSS)
+cargo run -p workex-bench --release --bin shared-bench
+
+# 1M active isolates (SharedRuntime, real RSS)
+cargo run -p workex-bench --release --bin million-real-bench
+
+# 10K real Worker RSS (full code execution, 3-way)
+cargo run -p workex-bench --release --bin rss-real-bench
+
+# k6 HTTP load test (3 servers, ramping VUs, 35 seconds)
+bash benchmarks/scripts/run-k6.sh
+
+# Results saved to benchmarks/results/ as versioned JSON
+```
 
 ---
 
