@@ -166,7 +166,7 @@ pub fn run(module: &CompiledModule, mut frame: VmFrame) -> VmResult {
 
             Instruction::NewStr { dst, idx } => {
                 let s = module.strings.get(idx as usize).cloned().unwrap_or_default();
-                frame.registers[dst as usize] = JsValue::Str(s);
+                frame.registers[dst as usize] = JsValue::str(s);
                 frame.ip += 1;
             }
 
@@ -259,7 +259,7 @@ pub fn run(module: &CompiledModule, mut frame: VmFrame) -> VmResult {
                     frame.ip = tc.catch_ip;
                 } else {
                     let msg = match &error {
-                        JsValue::Str(s) => s.clone(),
+                        JsValue::Str(s) => s.to_string(),
                         _ => format!("{:?}", error),
                     };
                     return VmResult::Error(format!("Uncaught: {msg}"));
@@ -320,23 +320,23 @@ fn build_io_request(io_type: &IoType, regs: &[JsValue; 256]) -> IoRequest {
     match io_type {
         IoType::Fetch => {
             let url = match &regs[0] {
-                JsValue::Str(s) => s.clone(),
+                JsValue::Str(s) => s.to_string(),
                 _ => String::new(),
             };
             IoRequest::Fetch { url, method: "GET".into(), body: None }
         }
         IoType::KvGet => IoRequest::KvGet {
             binding: "KV".into(),
-            key: match &regs[0] { JsValue::Str(s) => s.clone(), _ => String::new() },
+            key: match &regs[0] { JsValue::Str(s) => s.to_string(), _ => String::new() },
         },
         IoType::KvPut => IoRequest::KvPut {
             binding: "KV".into(),
-            key: match &regs[0] { JsValue::Str(s) => s.clone(), _ => String::new() },
-            value: match &regs[1] { JsValue::Str(s) => s.clone(), _ => String::new() },
+            key: match &regs[0] { JsValue::Str(s) => s.to_string(), _ => String::new() },
+            value: match &regs[1] { JsValue::Str(s) => s.to_string(), _ => String::new() },
         },
         IoType::D1Query => IoRequest::D1Query {
             binding: "DB".into(),
-            sql: match &regs[0] { JsValue::Str(s) => s.clone(), _ => String::new() },
+            sql: match &regs[0] { JsValue::Str(s) => s.to_string(), _ => String::new() },
         },
         IoType::Other => IoRequest::Fetch { url: String::new(), method: "GET".into(), body: None },
     }
@@ -397,7 +397,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0b01, io_type: IoType::Fetch },
                 Instruction::Return { val: 0 }, // return I/O result
             ],
-            constants: vec![JsValue::Str("https://api.com".into())],
+            constants: vec![JsValue::str("https://api.com")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::from([(0, 0b01)]),
@@ -420,11 +420,11 @@ mod tests {
                 // Resume with I/O result
                 let resumed = VmFrame::from_continuation(
                     continuation,
-                    JsValue::Str("response body".into()),
+                    JsValue::str("response body"),
                 );
                 match run(&module, resumed) {
                     VmResult::Done(JsValue::Str(s)) => {
-                        assert_eq!(s, "response body");
+                        assert_eq!(&*s, "response body");
                     }
                     other => panic!("expected Done after resume, got error"),
                 }
@@ -449,7 +449,7 @@ mod tests {
                 Instruction::Add { dst: 2, a: 0, b: 1 },    // r2 = r0 + r1
                 Instruction::Return { val: 2 },
             ],
-            constants: vec![JsValue::Str("url1".into()), JsValue::Str("url2".into())],
+            constants: vec![JsValue::str("url1"), JsValue::str("url2")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2), (1, 5)]),
             live_reg_masks: HashMap::from([(0, 0), (1, 0b10)]),
@@ -489,7 +489,7 @@ mod tests {
                 // catch block (ip=3)
                 Instruction::Return { val: 1 }, // return the caught error
             ],
-            constants: vec![JsValue::Str("boom".into())],
+            constants: vec![JsValue::str("boom")],
             strings: Vec::new(),
             resume_table: HashMap::new(),
             live_reg_masks: HashMap::new(),
@@ -497,7 +497,7 @@ mod tests {
 
         let frame = VmFrame::new(AgentId(1));
         match run(&module, frame) {
-            VmResult::Done(JsValue::Str(s)) => assert_eq!(s, "boom"),
+            VmResult::Done(JsValue::Str(s)) => assert_eq!(&*s, "boom"),
             other => panic!("expected caught error, got: {:?}", match other { VmResult::Error(e) => e, _ => "?".into() }),
         }
     }
@@ -510,7 +510,7 @@ mod tests {
                 Instruction::LoadConst { dst: 0, idx: 0 },
                 Instruction::Throw { val: 0 },
             ],
-            constants: vec![JsValue::Str("uncaught".into())],
+            constants: vec![JsValue::str("uncaught")],
             strings: Vec::new(),
             resume_table: HashMap::new(),
             live_reg_masks: HashMap::new(),
@@ -581,7 +581,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0b1, io_type: IoType::Fetch },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("secret_A".into())],
+            constants: vec![JsValue::str("secret_A")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::from([(0, 0b1)]),
@@ -622,7 +622,7 @@ mod tests {
         let frame = VmFrame::new(AgentId(1));
         match run(&module, frame) {
             VmResult::Done(JsValue::Object(map)) => {
-                assert_eq!(map["body"], JsValue::Str("hello".into()));
+                assert_eq!(map["body"], JsValue::str("hello"));
                 assert_eq!(map["status"], JsValue::Number(200.0));
                 assert_eq!(map["__is_response"], JsValue::Bool(true));
             }

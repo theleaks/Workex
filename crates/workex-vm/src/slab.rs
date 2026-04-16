@@ -68,8 +68,8 @@ mod tests {
             agent_id: AgentId(id),
             resume_id: 0,
             saved_registers: vec![
-                (0, JsValue::Str(format!("https://api.example.com/{id}"))),
-                (1, JsValue::Str("Bearer token".into())),
+                (0, JsValue::str(format!("https://api.example.com/{id}"))),
+                (1, JsValue::str("Bearer token")),
             ],
             ip: 5,
             dst_register: 2,

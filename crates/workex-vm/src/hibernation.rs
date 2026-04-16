@@ -147,7 +147,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0b1, io_type: IoType::Fetch },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("https://api.openai.com".into())],
+            constants: vec![JsValue::str("https://api.openai.com")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::from([(0, 0b1)]),
@@ -163,7 +163,7 @@ mod tests {
         let cont = Continuation {
             agent_id: AgentId(42),
             resume_id: 0,
-            saved_registers: vec![(0, JsValue::Str("data".into()))],
+            saved_registers: vec![(0, JsValue::str("data"))],
             ip: 5,
             dst_register: 1,
         };
@@ -230,7 +230,7 @@ mod tests {
             assert_eq!(scheduler2.suspended_count(), 1);
 
             let agent_id = AgentId(agent_slot as u64);
-            let result = scheduler2.resume(agent_id, JsValue::Str("LLM response".into()));
+            let result = scheduler2.resume(agent_id, JsValue::str("LLM response"));
             match result {
                 crate::scheduler::DispatchResult::Done(val) => {
                     println!("Agent survived restart! Result: {:?}", val);
@@ -254,8 +254,8 @@ mod tests {
                 agent_id: AgentId(i),
                 resume_id: 0,
                 saved_registers: vec![
-                    (0, JsValue::Str(format!("https://api.example.com/{i}"))),
-                    (1, JsValue::Str("Bearer sk-xxx".into())),
+                    (0, JsValue::str(format!("https://api.example.com/{i}"))),
+                    (1, JsValue::str("Bearer sk-xxx")),
                 ],
                 ip: 5,
                 dst_register: 2,

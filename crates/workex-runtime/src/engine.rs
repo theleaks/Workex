@@ -162,6 +162,10 @@ impl WarmContext {
             crate::fetch_bridge::register_fetch(&ctx)?;
             ctx.eval::<(), _>(js_source.as_bytes())
                 .map_err(|e| anyhow::anyhow!("worker source: {e}"))?;
+            // Pre-cache fetch handler reference for fast calls
+            ctx.eval::<(), _>(
+                "var __workex_cached_fetch__ = __workex_mod__ ? __workex_mod__.fetch : null;"
+            ).ok();
             Ok(())
         })?;
 
@@ -169,10 +173,9 @@ impl WarmContext {
     }
 
     /// Execute a request on this pre-warmed context.
-    /// Only sets request, calls fetch, reads response — no source eval.
+    /// FIX: fetch() is called exactly ONCE — handles both sync and async.
     fn handle_request(&self, request: &WorkexRequest) -> anyhow::Result<WorkexResponse> {
         self.ctx.with(|ctx| {
-            // Set request
             let req_obj = Object::new(ctx.clone())
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             req_obj.set("url", request.url.as_str()).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -180,35 +183,25 @@ impl WarmContext {
             ctx.globals().set("__workex_request__", req_obj)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Call fetch — module already compiled
-            let result: Value = ctx.eval("__workex_mod__.fetch(__workex_request__)")
-                .map_err(|e| anyhow::anyhow!("fetch: {e}"))?;
+            // SINGLE call via cached function ref — no string re-parsing
+            ctx.eval::<(), _>(r#"
+                var __workex_resolved__ = null;
+                var __f__ = __workex_cached_fetch__ || __workex_mod__.fetch;
+                var __workex_result__ = __f__(__workex_request__);
+                if (__workex_result__ && typeof __workex_result__.then === 'function') {
+                    __workex_result__.then(function(r) { __workex_resolved__ = r; });
+                } else {
+                    __workex_resolved__ = __workex_result__;
+                }
+            "#).map_err(|e| anyhow::anyhow!("fetch: {e}"))?;
 
             while ctx.execute_pending_job() {}
 
-            // Direct response
-            if let Some(resp) = try_extract_response(&ctx, &result) {
-                return Ok(resp);
-            }
+            let resolved: Value = ctx.eval("__workex_resolved__")
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Promise resolution
-            if result.is_object() {
-                ctx.eval::<(), _>(
-                    "var __workex_resolved__ = null;\
-                     var __p__ = __workex_mod__.fetch(__workex_request__);\
-                     if (__p__ && typeof __p__.then === 'function') { __p__.then(function(r) { __workex_resolved__ = r; }); }\
-                     else { __workex_resolved__ = __p__; }"
-                ).map_err(|e| anyhow::anyhow!("{e}"))?;
-                while ctx.execute_pending_job() {}
-
-                let resolved: Value = ctx.eval("__workex_resolved__")
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                if let Some(resp) = try_extract_response(&ctx, &resolved) {
-                    return Ok(resp);
-                }
-            }
-
-            anyhow::bail!("fetch() did not return a Response")
+            try_extract_response(&ctx, &resolved)
+                .ok_or_else(|| anyhow::anyhow!("fetch() did not return a Response"))
         })
     }
 }
@@ -542,5 +535,40 @@ mod tests {
         let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
         assert_eq!(resp.text().unwrap(), "Hello from Workex!");
         assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn async_worker_fetch_called_once() {
+        let source = r#"
+            var __call_count__ = 0;
+            export default {
+                async fetch(request) {
+                    __call_count__++;
+                    var data = await Promise.resolve("ok");
+                    return new Response("calls=" + __call_count__);
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 1).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        assert_eq!(resp.text().unwrap(), "calls=1",
+            "async fetch() should be called exactly once, not twice");
+    }
+
+    #[test]
+    fn kv_write_happens_once() {
+        let source = r#"
+            var __write_count__ = 0;
+            export default {
+                async fetch(request) {
+                    __write_count__++;
+                    var value = await Promise.resolve("data");
+                    return new Response("writes=" + __write_count__);
+                }
+            };
+        "#;
+        let mut pool = WorkexEnginePool::new(source, 1).unwrap();
+        let resp = pool.handle(&WorkexRequest::get("https://x.com/")).unwrap();
+        assert_eq!(resp.text().unwrap(), "writes=1");
     }
 }

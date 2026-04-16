@@ -156,21 +156,21 @@ async fn execute_io(request: &IoRequest) -> JsValue {
                     let text = resp.text().await.unwrap_or_default();
                     let mut map = HashMap::new();
                     map.insert("status".into(), JsValue::Number(status as f64));
-                    map.insert("body".into(), JsValue::Str(text));
+                    map.insert("body".into(), JsValue::str(text));
                     JsValue::Object(map)
                 }
-                Err(e) => JsValue::Str(format!("fetch error: {e}")),
+                Err(e) => JsValue::str(format!("fetch error: {e}")),
             }
         }
 
         IoRequest::KvGet { binding, key } => {
             match KvNamespace::new(binding) {
                 Ok(kv) => match kv.get(key).await {
-                    Ok(Some(val)) => JsValue::Str(val),
+                    Ok(Some(val)) => JsValue::str(val),
                     Ok(None) => JsValue::Null,
-                    Err(e) => JsValue::Str(format!("KV error: {e}")),
+                    Err(e) => JsValue::str(format!("KV error: {e}")),
                 },
-                Err(e) => JsValue::Str(format!("KV open error: {e}")),
+                Err(e) => JsValue::str(format!("KV open error: {e}")),
             }
         }
 
@@ -178,9 +178,9 @@ async fn execute_io(request: &IoRequest) -> JsValue {
             match KvNamespace::new(binding) {
                 Ok(mut kv) => match kv.put(key, value).await {
                     Ok(()) => JsValue::Undefined,
-                    Err(e) => JsValue::Str(format!("KV put error: {e}")),
+                    Err(e) => JsValue::str(format!("KV put error: {e}")),
                 },
-                Err(e) => JsValue::Str(format!("KV open error: {e}")),
+                Err(e) => JsValue::str(format!("KV open error: {e}")),
             }
         }
 
@@ -192,9 +192,9 @@ async fn execute_io(request: &IoRequest) -> JsValue {
                         map.insert("changes".into(), JsValue::Number(result.meta.changes as f64));
                         JsValue::Object(map)
                     }
-                    Err(e) => JsValue::Str(format!("D1 error: {e}")),
+                    Err(e) => JsValue::str(format!("D1 error: {e}")),
                 },
-                Err(e) => JsValue::Str(format!("D1 open error: {e}")),
+                Err(e) => JsValue::str(format!("D1 open error: {e}")),
             }
         }
     }
@@ -223,7 +223,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0, io_type: IoType::Fetch },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("https://api.example.com".into())],
+            constants: vec![JsValue::str("https://api.example.com")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::new(),
@@ -244,9 +244,9 @@ mod tests {
         assert_eq!(sched.suspended_count(), 1);
 
         // Resume with result
-        let result = sched.resume(agent_id, JsValue::Str("api response".into()));
+        let result = sched.resume(agent_id, JsValue::str("api response"));
         match result {
-            DispatchResult::Done(JsValue::Str(s)) => assert_eq!(s, "api response"),
+            DispatchResult::Done(JsValue::Str(s)) => assert_eq!(&*s, "api response"),
             _ => panic!("expected done"),
         }
         assert_eq!(sched.suspended_count(), 0);
@@ -274,7 +274,7 @@ mod tests {
 
         // Resume all
         for id in ids {
-            sched.resume(id, JsValue::Str("done".into()));
+            sched.resume(id, JsValue::str("done"));
         }
         assert_eq!(sched.suspended_count(), 0);
     }
@@ -288,7 +288,7 @@ mod tests {
                 Instruction::LoadConst { dst: 0, idx: 0 },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("done".into())],
+            constants: vec![JsValue::str("done")],
             strings: Vec::new(),
             resume_table: HashMap::new(),
             live_reg_masks: HashMap::new(),
@@ -299,7 +299,7 @@ mod tests {
         let result = rt.block_on(sched.dispatch_full());
 
         match result {
-            Ok(JsValue::Str(s)) => assert_eq!(s, "done"),
+            Ok(JsValue::Str(s)) => assert_eq!(&*s, "done"),
             other => panic!("expected Ok(done), got: {:?}", other),
         }
     }
@@ -314,7 +314,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0, io_type: IoType::KvGet },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("test-key".into())],
+            constants: vec![JsValue::str("test-key")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::new(),
@@ -332,7 +332,7 @@ mod tests {
         // Dispatch — will suspend at KV get, execute real I/O, resume
         let result = rt.block_on(sched.dispatch_full());
         match result {
-            Ok(JsValue::Str(s)) => assert_eq!(s, "test-value"),
+            Ok(JsValue::Str(s)) => assert_eq!(&*s, "test-value"),
             Ok(JsValue::Null) => {} // KV might not find it in CI, that's ok
             other => panic!("expected KV result, got: {:?}", other),
         }

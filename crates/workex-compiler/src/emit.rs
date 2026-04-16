@@ -124,26 +124,26 @@ impl BytecodeEmitter {
     fn emit_io_args(&mut self, point: &SuspendPoint) {
         match &point.call_type {
             AsyncCallType::Fetch { url_expr } => {
-                let idx = self.add_constant(JsValue::Str(url_expr.clone()));
+                let idx = self.add_constant(JsValue::str(url_expr.clone()));
                 self.instructions.push(Instruction::LoadConst { dst: 0, idx: idx as u16 });
             }
             AsyncCallType::KvGet { key_expr } => {
-                let idx = self.add_constant(JsValue::Str(key_expr.clone()));
+                let idx = self.add_constant(JsValue::str(key_expr.clone()));
                 self.instructions.push(Instruction::LoadConst { dst: 0, idx: idx as u16 });
             }
             AsyncCallType::KvPut { key_expr, value_expr } => {
-                let kid = self.add_constant(JsValue::Str(key_expr.clone()));
-                let vid = self.add_constant(JsValue::Str(value_expr.clone()));
+                let kid = self.add_constant(JsValue::str(key_expr.clone()));
+                let vid = self.add_constant(JsValue::str(value_expr.clone()));
                 self.instructions.push(Instruction::LoadConst { dst: 0, idx: kid as u16 });
                 self.instructions.push(Instruction::LoadConst { dst: 1, idx: vid as u16 });
             }
             AsyncCallType::D1Query { sql_expr } => {
-                let idx = self.add_constant(JsValue::Str(sql_expr.clone()));
+                let idx = self.add_constant(JsValue::str(sql_expr.clone()));
                 self.instructions.push(Instruction::LoadConst { dst: 0, idx: idx as u16 });
             }
             AsyncCallType::Other { .. } => {
                 // Generic — put placeholder
-                let idx = self.add_constant(JsValue::Str("<other>".into()));
+                let idx = self.add_constant(JsValue::str("<other>"));
                 self.instructions.push(Instruction::LoadConst { dst: 0, idx: idx as u16 });
             }
         }
@@ -151,7 +151,7 @@ impl BytecodeEmitter {
 
     fn emit_sync_worker(&mut self) {
         // Sync worker: just build a response and return
-        let body_idx = self.add_constant(JsValue::Str("ok".into()));
+        let body_idx = self.add_constant(JsValue::str("ok"));
         let status_idx = self.add_constant(JsValue::Number(200.0));
         let body_reg = self.alloc_reg();
         let status_reg = self.alloc_reg();

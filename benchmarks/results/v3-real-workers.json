@@ -4,35 +4,35 @@
   "v8": {
     "count": 10000,
     "gc_available": true,
-    "rss_after_bytes": 1915625472,
-    "rss_before_bytes": 41582592,
-    "rss_delta_bytes": 1874042880,
-    "rss_delta_mb": "1787.2",
-    "rss_per_context_bytes": 187404,
-    "rss_per_context_kb": "183.0",
+    "rss_after_bytes": 1925066752,
+    "rss_before_bytes": 49295360,
+    "rss_delta_bytes": 1875771392,
+    "rss_delta_mb": "1788.9",
+    "rss_per_context_bytes": 187577,
+    "rss_per_context_kb": "183.2",
     "runtime": "v8",
     "test": "10k_real_worker_rss"
   },
   "worker_source": "JSON API handler (parse URL, stringify response)",
   "workers": {
     "actual_count": 100,
-    "extrapolated_10k_mb": "6479.3",
+    "extrapolated_10k_mb": "4482.4",
     "extrapolated_to": 10000,
     "gc_available": true,
-    "rss_after_bytes": 165019648,
-    "rss_before_bytes": 97079296,
-    "rss_delta_bytes": 67940352,
-    "rss_delta_mb": "64.8",
-    "rss_per_worker_bytes": 679404,
-    "rss_per_worker_kb": "663.5",
+    "rss_after_bytes": 147746816,
+    "rss_before_bytes": 100745216,
+    "rss_delta_bytes": 47001600,
+    "rss_delta_mb": "44.8",
+    "rss_per_worker_bytes": 470016,
+    "rss_per_worker_kb": "459.0",
     "runtime": "workers",
     "test": "real_worker_rss"
   },
   "workex": {
-    "rss_delta_bytes": 1169592320,
-    "rss_delta_mb": "1115.4",
-    "rss_per_worker_bytes": 116959,
-    "rss_per_worker_kb": "114.2",
-    "spawn_time_ms": 1946
+    "rss_delta_bytes": 1167708160,
+    "rss_delta_mb": "1113.6",
+    "rss_per_worker_bytes": 116770,
+    "rss_per_worker_kb": "114.0",
+    "spawn_time_ms": 1901
   }
 }

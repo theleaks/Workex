@@ -75,14 +75,50 @@ pub struct CompiledModule {
 }
 
 /// Minimal JS value for the bytecode VM.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Uses Arc<str> for strings — shared across agents without copying.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum JsValue {
     Undefined,
     Null,
     Bool(bool),
     Number(f64),
-    Str(String),
+    Str(#[serde(with = "arc_str_serde")] std::sync::Arc<str>),
     Object(HashMap<String, JsValue>),
+}
+
+impl PartialEq for JsValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (JsValue::Undefined, JsValue::Undefined) => true,
+            (JsValue::Null, JsValue::Null) => true,
+            (JsValue::Bool(a), JsValue::Bool(b)) => a == b,
+            (JsValue::Number(a), JsValue::Number(b)) => a == b,
+            (JsValue::Str(a), JsValue::Str(b)) => a == b,
+            (JsValue::Object(a), JsValue::Object(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl JsValue {
+    pub fn str(s: impl Into<std::sync::Arc<str>>) -> Self {
+        JsValue::Str(s.into())
+    }
+}
+
+/// Serde support for Arc<str>
+mod arc_str_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer>(v: &Arc<str>, s: S) -> Result<S::Ok, S::Error> {
+        v.as_ref().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Arc<str>, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Arc::from(s.as_str()))
+    }
 }
 
 #[cfg(test)]
@@ -97,8 +133,8 @@ mod tests {
 
     #[test]
     fn jsvalue_basic() {
-        let v = JsValue::Str("hello".into());
-        assert_eq!(v, JsValue::Str("hello".into()));
+        let v = JsValue::str("hello");
+        assert_eq!(v, JsValue::str("hello"));
 
         let mut map = HashMap::new();
         map.insert("x".into(), JsValue::Number(42.0));
