@@ -27,6 +27,14 @@ path = "src/million_bench.rs"
 name = "unified-bench"
 path = "src/unified.rs"
 
+[[bin]]
+name = "shared-bench"
+path = "src/shared_bench.rs"
+
+[[bin]]
+name = "million-real-bench"
+path = "src/million_real_bench.rs"
+
 [dependencies]
 workex-core = { path = "../workex-core" }
 workex-compiler = { path = "../workex-compiler" }

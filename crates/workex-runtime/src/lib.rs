@@ -12,3 +12,5 @@ pub mod env;
 pub mod fetch;
 pub mod fetch_bridge;
 pub mod engine;
+pub mod shared_runtime;
+pub mod registry;

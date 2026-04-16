@@ -1,0 +1,22 @@
+{
+  "architecture": "1000 SharedRuntimes x 1000 Contexts",
+  "benchmark": "1m_real_execution_contexts",
+  "contexts_per_runtime": 1000,
+  "factor_vs_v8": "10.8",
+  "note": "Workex 1M is a real allocation. V8 1M is extrapolated.",
+  "runtimes": 1000,
+  "total_contexts": 1000000,
+  "v8_extrapolated": {
+    "note": "extrapolated from measured 10K vm.createContext() benchmark",
+    "per_context_kb": 178.0,
+    "total_gb": "169.8"
+  },
+  "workex": {
+    "per_context_bytes": 16844,
+    "per_context_kb": 16,
+    "rss_delta_bytes": 16844869632,
+    "rss_delta_gb": "15.69",
+    "spawn_rate": "3501",
+    "spawn_time_secs": 285.6572974
+  }
+}

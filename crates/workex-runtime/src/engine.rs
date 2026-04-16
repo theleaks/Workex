@@ -266,7 +266,7 @@ impl WorkexEnginePool {
 }
 
 /// Prepare Worker source: strip TS, wrap export default.
-fn prepare_source(source: &str) -> String {
+pub fn prepare_source(source: &str) -> String {
     let js = strip_ts_annotations(source);
     if js.contains("export default") {
         let mut s = js.replace("export default", "var __workex_mod__ =");
