@@ -10,6 +10,7 @@ bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rquickjs = { workspace = true }
+workex-compiler = { path = "../workex-compiler" }
 sled = { workspace = true }
 rusqlite = { workspace = true }
 reqwest = { workspace = true }

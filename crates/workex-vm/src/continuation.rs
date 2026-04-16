@@ -60,8 +60,8 @@ mod tests {
             agent_id: AgentId(1),
             resume_id: 0,
             saved_registers: vec![
-                (0, JsValue::Str("https://example.com/api".into())),
-                (1, JsValue::Str("GET".into())),
+                (0, JsValue::str("https://example.com/api")),
+                (1, JsValue::str("GET")),
                 (2, JsValue::Number(200.0)),
             ],
             ip: 5,
@@ -77,16 +77,16 @@ mod tests {
     fn continuation_with_request_data() {
         // Simulates a real agent suspended at fetch() with request context
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), JsValue::Str("application/json".into()));
-        headers.insert("authorization".into(), JsValue::Str("Bearer tok123".into()));
+        headers.insert("content-type".into(), JsValue::str("application/json"));
+        headers.insert("authorization".into(), JsValue::str("Bearer tok123"));
 
         let cont = Continuation {
             agent_id: AgentId(42),
             resume_id: 1,
             saved_registers: vec![
-                (0, JsValue::Str("https://api.openai.com/v1/chat".into())),
+                (0, JsValue::str("https://api.openai.com/v1/chat")),
                 (1, JsValue::Object(headers)),
-                (2, JsValue::Str(r#"{"model":"gpt-4","messages":[]}"#.into())),
+                (2, JsValue::str(r#"{"model":"gpt-4","messages":[]}"#)),
             ],
             ip: 8,
             dst_register: 4,

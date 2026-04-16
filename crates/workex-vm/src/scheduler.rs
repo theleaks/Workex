@@ -12,12 +12,13 @@ use workex_runtime::kv::KvNamespace;
 use workex_runtime::d1::D1Database;
 
 use crate::continuation::{AgentId, Continuation, IoRequest};
+use crate::slab::ContinuationSlab;
 use crate::vm::{VmFrame, VmResult, run};
 
-/// The agent scheduler.
+/// The agent scheduler — manages millions of concurrent agents.
 pub struct AgentScheduler {
     module: Arc<CompiledModule>,
-    suspended: Mutex<HashMap<AgentId, Continuation>>,
+    pub suspended: Mutex<ContinuationSlab>,
     next_id: AtomicU64,
 }
 
@@ -25,7 +26,7 @@ impl AgentScheduler {
     pub fn new(module: Arc<CompiledModule>) -> Self {
         Self {
             module,
-            suspended: Mutex::new(HashMap::new()),
+            suspended: Mutex::new(ContinuationSlab::new()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -38,10 +39,10 @@ impl AgentScheduler {
     }
 
     /// Dispatch and immediately suspend (for benchmarking).
-    /// Returns the continuation if the agent suspended.
     pub fn dispatch_and_suspend(&self) -> Option<AgentId> {
         match self.dispatch() {
             DispatchResult::Suspended { agent_id, .. } => Some(agent_id),
+            DispatchResult::SuspendedMulti { agent_id, .. } => Some(agent_id),
             _ => None,
         }
     }
@@ -50,7 +51,7 @@ impl AgentScheduler {
     pub fn resume(&self, agent_id: AgentId, io_result: JsValue) -> DispatchResult {
         let cont = {
             let mut suspended = self.suspended.lock().unwrap();
-            suspended.remove(&agent_id)
+            suspended.remove(agent_id.0 as usize)
         };
 
         match cont {
@@ -65,33 +66,46 @@ impl AgentScheduler {
     fn execute(&self, frame: VmFrame) -> DispatchResult {
         match run(&self.module, frame) {
             VmResult::Done(val) => DispatchResult::Done(val),
-            VmResult::Suspended { agent_id, continuation, io_request } => {
-                let mut suspended = self.suspended.lock().unwrap();
-                suspended.insert(agent_id, continuation);
-                DispatchResult::Suspended { agent_id, io_request }
-            }
             VmResult::Error(e) => DispatchResult::Error(e),
+            VmResult::Suspended { continuation, io_request, .. } => {
+                let mut suspended = self.suspended.lock().unwrap();
+                let slot = suspended.insert(continuation);
+                DispatchResult::Suspended { agent_id: AgentId(slot as u64), io_request }
+            }
+            VmResult::SuspendedMulti { continuation, io_requests, .. } => {
+                let mut suspended = self.suspended.lock().unwrap();
+                let slot = suspended.insert(continuation);
+                DispatchResult::SuspendedMulti { agent_id: AgentId(slot as u64), io_requests }
+            }
         }
     }
 
-    /// Number of suspended agents.
     pub fn suspended_count(&self) -> usize {
         self.suspended.lock().unwrap().len()
     }
 
-    /// Total memory used by all continuations.
     pub fn suspended_memory_bytes(&self) -> usize {
-        self.suspended.lock().unwrap()
-            .values()
-            .map(|c| c.size_bytes())
-            .sum()
+        self.suspended.lock().unwrap().memory_bytes()
     }
 
-    /// Average continuation size.
+    /// Spawn N agents concurrently, run all to completion.
+    pub async fn dispatch_many(self: Arc<Self>, count: usize) -> Vec<Result<JsValue, String>> {
+        let mut handles = Vec::with_capacity(count);
+        for _ in 0..count {
+            let sched = self.clone();
+            handles.push(tokio::spawn(async move { sched.dispatch_full().await }));
+        }
+        futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.map_err(|e| e.to_string()).and_then(|r| r))
+            .collect()
+    }
+
     pub fn avg_continuation_bytes(&self) -> usize {
         let s = self.suspended.lock().unwrap();
         if s.is_empty() { return 0; }
-        s.values().map(|c| c.size_bytes()).sum::<usize>() / s.len()
+        s.memory_bytes() / s.len()
     }
 
     /// Full dispatch: run agent, execute real I/O on suspend, resume until done.
@@ -105,10 +119,21 @@ impl AgentScheduler {
                 VmResult::Done(val) => return Ok(val),
                 VmResult::Error(e) => return Err(e),
                 VmResult::Suspended { continuation, io_request, .. } => {
-                    // Execute real I/O
                     let io_result = execute_io(&io_request).await;
-                    // Rebuild frame from continuation + result
                     frame = VmFrame::from_continuation(continuation, io_result);
+                }
+                VmResult::SuspendedMulti { continuation, io_requests, .. } => {
+                    // FIX: ALL I/O ops run in parallel via join_all
+                    let futs: Vec<_> = io_requests.iter()
+                        .map(|req| execute_io(req))
+                        .collect();
+                    let results = futures::future::join_all(futs).await;
+                    let combined = JsValue::Object(
+                        results.into_iter().enumerate()
+                            .map(|(i, v)| (i.to_string(), v))
+                            .collect(),
+                    );
+                    frame = VmFrame::from_continuation(continuation, combined);
                 }
             }
         }
@@ -131,21 +156,21 @@ async fn execute_io(request: &IoRequest) -> JsValue {
                     let text = resp.text().await.unwrap_or_default();
                     let mut map = HashMap::new();
                     map.insert("status".into(), JsValue::Number(status as f64));
-                    map.insert("body".into(), JsValue::Str(text));
+                    map.insert("body".into(), JsValue::str(text));
                     JsValue::Object(map)
                 }
-                Err(e) => JsValue::Str(format!("fetch error: {e}")),
+                Err(e) => JsValue::str(format!("fetch error: {e}")),
             }
         }
 
         IoRequest::KvGet { binding, key } => {
             match KvNamespace::new(binding) {
                 Ok(kv) => match kv.get(key).await {
-                    Ok(Some(val)) => JsValue::Str(val),
+                    Ok(Some(val)) => JsValue::str(val),
                     Ok(None) => JsValue::Null,
-                    Err(e) => JsValue::Str(format!("KV error: {e}")),
+                    Err(e) => JsValue::str(format!("KV error: {e}")),
                 },
-                Err(e) => JsValue::Str(format!("KV open error: {e}")),
+                Err(e) => JsValue::str(format!("KV open error: {e}")),
             }
         }
 
@@ -153,9 +178,9 @@ async fn execute_io(request: &IoRequest) -> JsValue {
             match KvNamespace::new(binding) {
                 Ok(mut kv) => match kv.put(key, value).await {
                     Ok(()) => JsValue::Undefined,
-                    Err(e) => JsValue::Str(format!("KV put error: {e}")),
+                    Err(e) => JsValue::str(format!("KV put error: {e}")),
                 },
-                Err(e) => JsValue::Str(format!("KV open error: {e}")),
+                Err(e) => JsValue::str(format!("KV open error: {e}")),
             }
         }
 
@@ -167,9 +192,9 @@ async fn execute_io(request: &IoRequest) -> JsValue {
                         map.insert("changes".into(), JsValue::Number(result.meta.changes as f64));
                         JsValue::Object(map)
                     }
-                    Err(e) => JsValue::Str(format!("D1 error: {e}")),
+                    Err(e) => JsValue::str(format!("D1 error: {e}")),
                 },
-                Err(e) => JsValue::Str(format!("D1 open error: {e}")),
+                Err(e) => JsValue::str(format!("D1 open error: {e}")),
             }
         }
     }
@@ -180,6 +205,7 @@ async fn execute_io(request: &IoRequest) -> JsValue {
 pub enum DispatchResult {
     Done(JsValue),
     Suspended { agent_id: AgentId, io_request: IoRequest },
+    SuspendedMulti { agent_id: AgentId, io_requests: Vec<IoRequest> },
     Error(String),
 }
 
@@ -197,7 +223,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0, io_type: IoType::Fetch },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("https://api.example.com".into())],
+            constants: vec![JsValue::str("https://api.example.com")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::new(),
@@ -218,9 +244,9 @@ mod tests {
         assert_eq!(sched.suspended_count(), 1);
 
         // Resume with result
-        let result = sched.resume(agent_id, JsValue::Str("api response".into()));
+        let result = sched.resume(agent_id, JsValue::str("api response"));
         match result {
-            DispatchResult::Done(JsValue::Str(s)) => assert_eq!(s, "api response"),
+            DispatchResult::Done(JsValue::Str(s)) => assert_eq!(&*s, "api response"),
             _ => panic!("expected done"),
         }
         assert_eq!(sched.suspended_count(), 0);
@@ -248,7 +274,7 @@ mod tests {
 
         // Resume all
         for id in ids {
-            sched.resume(id, JsValue::Str("done".into()));
+            sched.resume(id, JsValue::str("done"));
         }
         assert_eq!(sched.suspended_count(), 0);
     }
@@ -262,7 +288,7 @@ mod tests {
                 Instruction::LoadConst { dst: 0, idx: 0 },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("done".into())],
+            constants: vec![JsValue::str("done")],
             strings: Vec::new(),
             resume_table: HashMap::new(),
             live_reg_masks: HashMap::new(),
@@ -273,7 +299,7 @@ mod tests {
         let result = rt.block_on(sched.dispatch_full());
 
         match result {
-            Ok(JsValue::Str(s)) => assert_eq!(s, "done"),
+            Ok(JsValue::Str(s)) => assert_eq!(&*s, "done"),
             other => panic!("expected Ok(done), got: {:?}", other),
         }
     }
@@ -288,7 +314,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0, io_type: IoType::KvGet },
                 Instruction::Return { val: 0 },
             ],
-            constants: vec![JsValue::Str("test-key".into())],
+            constants: vec![JsValue::str("test-key")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::new(),
@@ -306,7 +332,7 @@ mod tests {
         // Dispatch — will suspend at KV get, execute real I/O, resume
         let result = rt.block_on(sched.dispatch_full());
         match result {
-            Ok(JsValue::Str(s)) => assert_eq!(s, "test-value"),
+            Ok(JsValue::Str(s)) => assert_eq!(&*s, "test-value"),
             Ok(JsValue::Null) => {} // KV might not find it in CI, that's ok
             other => panic!("expected KV result, got: {:?}", other),
         }

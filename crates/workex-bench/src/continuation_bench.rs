@@ -41,9 +41,9 @@ fn main() {
             Instruction::Return { val: 0 },
         ],
         constants: vec![
-            JsValue::Str("https://api.openai.com/v1/chat/completions".into()),
-            JsValue::Str("Bearer sk-xxx".into()),
-            JsValue::Str(r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#.into()),
+            JsValue::str("https://api.openai.com/v1/chat/completions"),
+            JsValue::str("Bearer sk-xxx"),
+            JsValue::str(r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#),
         ],
         strings: Vec::new(),
         resume_table: HashMap::from([(0, 4)]),

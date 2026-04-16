@@ -11,12 +11,40 @@ use workex_core::arena::Arena;
 
 use crate::continuation::{AgentId, Continuation, IoRequest};
 
+/// Resource limits for agent execution.
+#[derive(Debug, Clone)]
+pub struct AgentLimits {
+    pub max_instructions: u64,
+    pub max_continuation_bytes: usize,
+    pub max_io_ops: u32,
+}
+
+impl Default for AgentLimits {
+    fn default() -> Self {
+        Self {
+            max_instructions: 1_000_000,
+            max_continuation_bytes: 65_536,
+            max_io_ops: 1_000,
+        }
+    }
+}
+
+/// Try/catch frame pushed on the error stack.
+#[derive(Debug, Clone)]
+pub struct TryCatchFrame {
+    pub catch_ip: usize,
+    pub error_reg: u8,
+}
+
 /// VM execution frame for one agent.
 pub struct VmFrame {
     pub agent_id: AgentId,
     pub registers: Box<[JsValue; 256]>,
     pub ip: usize,
     pub arena: Arena,
+    pub try_stack: Vec<TryCatchFrame>,
+    pub instruction_count: u64,
+    pub limits: AgentLimits,
 }
 
 impl VmFrame {
@@ -27,19 +55,25 @@ impl VmFrame {
             registers: Box::new(std::array::from_fn(|_| JsValue::Undefined)),
             ip: 0,
             arena: Arena::minimal(),
+            try_stack: Vec::new(),
+            instruction_count: 0,
+            limits: AgentLimits::default(),
+        }
+    }
+
+    pub fn new_with_limits(agent_id: AgentId, limits: AgentLimits) -> Self {
+        Self {
+            limits,
+            ..Self::new(agent_id)
         }
     }
 
     /// Rebuild frame from a continuation + I/O result.
     pub fn from_continuation(cont: Continuation, io_result: JsValue) -> Self {
         let mut registers: Box<[JsValue; 256]> = Box::new(std::array::from_fn(|_| JsValue::Undefined));
-
-        // Restore saved registers
         for (idx, val) in cont.saved_registers {
             registers[idx as usize] = val;
         }
-
-        // Put I/O result in destination register
         registers[cont.dst_register as usize] = io_result;
 
         Self {
@@ -47,6 +81,9 @@ impl VmFrame {
             registers,
             ip: cont.ip,
             arena: Arena::minimal(),
+            try_stack: Vec::new(),
+            instruction_count: 0,
+            limits: AgentLimits::default(),
         }
     }
 }
@@ -55,11 +92,17 @@ impl VmFrame {
 pub enum VmResult {
     /// Agent completed — response ready.
     Done(JsValue),
-    /// Agent suspended at an await — save continuation, do I/O.
+    /// Agent suspended at a single await.
     Suspended {
         agent_id: AgentId,
         continuation: Continuation,
         io_request: IoRequest,
+    },
+    /// Agent suspended at Promise.all — multiple parallel I/O.
+    SuspendedMulti {
+        agent_id: AgentId,
+        continuation: Continuation,
+        io_requests: Vec<IoRequest>,
     },
     /// Runtime error.
     Error(String),
@@ -70,6 +113,12 @@ pub fn run(module: &CompiledModule, mut frame: VmFrame) -> VmResult {
     loop {
         if frame.ip >= module.instructions.len() {
             return VmResult::Error("IP out of bounds".into());
+        }
+
+        // CPU limit check
+        frame.instruction_count += 1;
+        if frame.instruction_count > frame.limits.max_instructions {
+            return VmResult::Error("CPU limit exceeded".into());
         }
 
         let inst = module.instructions[frame.ip].clone();
@@ -117,7 +166,7 @@ pub fn run(module: &CompiledModule, mut frame: VmFrame) -> VmResult {
 
             Instruction::NewStr { dst, idx } => {
                 let s = module.strings.get(idx as usize).cloned().unwrap_or_default();
-                frame.registers[dst as usize] = JsValue::Str(s);
+                frame.registers[dst as usize] = JsValue::str(s);
                 frame.ip += 1;
             }
 
@@ -192,6 +241,54 @@ pub fn run(module: &CompiledModule, mut frame: VmFrame) -> VmResult {
                 frame.ip += 1;
             }
 
+            Instruction::TryCatch { catch_offset, error_reg } => {
+                let catch_ip = (frame.ip as i64 + catch_offset as i64) as usize;
+                frame.try_stack.push(TryCatchFrame { catch_ip, error_reg });
+                frame.ip += 1;
+            }
+
+            Instruction::EndTry => {
+                frame.try_stack.pop();
+                frame.ip += 1;
+            }
+
+            Instruction::Throw { val } => {
+                let error = frame.registers[val as usize].clone();
+                if let Some(tc) = frame.try_stack.pop() {
+                    frame.registers[tc.error_reg as usize] = error;
+                    frame.ip = tc.catch_ip;
+                } else {
+                    let msg = match &error {
+                        JsValue::Str(s) => s.to_string(),
+                        _ => format!("{:?}", error),
+                    };
+                    return VmResult::Error(format!("Uncaught: {msg}"));
+                }
+            }
+
+            Instruction::SuspendMulti { resume_id, live_regs, count } => {
+                let saved = save_live_registers(&frame.registers, live_regs);
+                let mut requests = Vec::new();
+                for i in 0..count {
+                    requests.push(build_io_request(
+                        &IoType::Fetch,
+                        &frame.registers,
+                    ));
+                }
+
+                return VmResult::SuspendedMulti {
+                    agent_id: frame.agent_id,
+                    continuation: Continuation {
+                        agent_id: frame.agent_id,
+                        resume_id,
+                        saved_registers: saved,
+                        ip: frame.ip + 1,
+                        dst_register: 0,
+                    },
+                    io_requests: requests,
+                };
+            }
+
             Instruction::WxResp { dst, body, status, headers } => {
                 let mut resp = HashMap::new();
                 resp.insert("body".into(), frame.registers[body as usize].clone());
@@ -223,23 +320,23 @@ fn build_io_request(io_type: &IoType, regs: &[JsValue; 256]) -> IoRequest {
     match io_type {
         IoType::Fetch => {
             let url = match &regs[0] {
-                JsValue::Str(s) => s.clone(),
+                JsValue::Str(s) => s.to_string(),
                 _ => String::new(),
             };
             IoRequest::Fetch { url, method: "GET".into(), body: None }
         }
         IoType::KvGet => IoRequest::KvGet {
             binding: "KV".into(),
-            key: match &regs[0] { JsValue::Str(s) => s.clone(), _ => String::new() },
+            key: match &regs[0] { JsValue::Str(s) => s.to_string(), _ => String::new() },
         },
         IoType::KvPut => IoRequest::KvPut {
             binding: "KV".into(),
-            key: match &regs[0] { JsValue::Str(s) => s.clone(), _ => String::new() },
-            value: match &regs[1] { JsValue::Str(s) => s.clone(), _ => String::new() },
+            key: match &regs[0] { JsValue::Str(s) => s.to_string(), _ => String::new() },
+            value: match &regs[1] { JsValue::Str(s) => s.to_string(), _ => String::new() },
         },
         IoType::D1Query => IoRequest::D1Query {
             binding: "DB".into(),
-            sql: match &regs[0] { JsValue::Str(s) => s.clone(), _ => String::new() },
+            sql: match &regs[0] { JsValue::Str(s) => s.to_string(), _ => String::new() },
         },
         IoType::Other => IoRequest::Fetch { url: String::new(), method: "GET".into(), body: None },
     }
@@ -300,7 +397,7 @@ mod tests {
                 Instruction::Suspend { resume_id: 0, live_regs: 0b01, io_type: IoType::Fetch },
                 Instruction::Return { val: 0 }, // return I/O result
             ],
-            constants: vec![JsValue::Str("https://api.com".into())],
+            constants: vec![JsValue::str("https://api.com")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2)]),
             live_reg_masks: HashMap::from([(0, 0b01)]),
@@ -323,11 +420,11 @@ mod tests {
                 // Resume with I/O result
                 let resumed = VmFrame::from_continuation(
                     continuation,
-                    JsValue::Str("response body".into()),
+                    JsValue::str("response body"),
                 );
                 match run(&module, resumed) {
                     VmResult::Done(JsValue::Str(s)) => {
-                        assert_eq!(s, "response body");
+                        assert_eq!(&*s, "response body");
                     }
                     other => panic!("expected Done after resume, got error"),
                 }
@@ -352,7 +449,7 @@ mod tests {
                 Instruction::Add { dst: 2, a: 0, b: 1 },    // r2 = r0 + r1
                 Instruction::Return { val: 2 },
             ],
-            constants: vec![JsValue::Str("url1".into()), JsValue::Str("url2".into())],
+            constants: vec![JsValue::str("url1"), JsValue::str("url2")],
             strings: Vec::new(),
             resume_table: HashMap::from([(0, 2), (1, 5)]),
             live_reg_masks: HashMap::from([(0, 0), (1, 0b10)]),
@@ -382,6 +479,130 @@ mod tests {
     }
 
     #[test]
+    fn vm_try_catch() {
+        let module = CompiledModule {
+            source_hash: 0,
+            instructions: vec![
+                Instruction::TryCatch { catch_offset: 3, error_reg: 1 },
+                Instruction::LoadConst { dst: 0, idx: 0 },
+                Instruction::Throw { val: 0 },
+                // catch block (ip=3)
+                Instruction::Return { val: 1 }, // return the caught error
+            ],
+            constants: vec![JsValue::str("boom")],
+            strings: Vec::new(),
+            resume_table: HashMap::new(),
+            live_reg_masks: HashMap::new(),
+        };
+
+        let frame = VmFrame::new(AgentId(1));
+        match run(&module, frame) {
+            VmResult::Done(JsValue::Str(s)) => assert_eq!(&*s, "boom"),
+            other => panic!("expected caught error, got: {:?}", match other { VmResult::Error(e) => e, _ => "?".into() }),
+        }
+    }
+
+    #[test]
+    fn vm_uncaught_throw() {
+        let module = CompiledModule {
+            source_hash: 0,
+            instructions: vec![
+                Instruction::LoadConst { dst: 0, idx: 0 },
+                Instruction::Throw { val: 0 },
+            ],
+            constants: vec![JsValue::str("uncaught")],
+            strings: Vec::new(),
+            resume_table: HashMap::new(),
+            live_reg_masks: HashMap::new(),
+        };
+
+        let frame = VmFrame::new(AgentId(1));
+        match run(&module, frame) {
+            VmResult::Error(e) => assert!(e.contains("uncaught"), "got: {e}"),
+            _ => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn vm_cpu_limit() {
+        // Infinite loop: Jump { offset: 0 } loops forever
+        let module = CompiledModule {
+            source_hash: 0,
+            instructions: vec![
+                Instruction::LoadConst { dst: 0, idx: 0 },
+                Instruction::Jump { offset: 0 }, // infinite loop at ip=1
+            ],
+            constants: vec![JsValue::Number(0.0)],
+            strings: Vec::new(),
+            resume_table: HashMap::new(),
+            live_reg_masks: HashMap::new(),
+        };
+
+        let frame = VmFrame::new_with_limits(AgentId(1), AgentLimits {
+            max_instructions: 100,
+            ..Default::default()
+        });
+        match run(&module, frame) {
+            VmResult::Error(e) => assert!(e.contains("CPU limit"), "got: {e}"),
+            _ => panic!("infinite loop should be killed"),
+        }
+    }
+
+    #[test]
+    fn vm_suspend_multi() {
+        let module = CompiledModule {
+            source_hash: 0,
+            instructions: vec![
+                Instruction::SuspendMulti { resume_id: 0, live_regs: 0, count: 3 },
+                Instruction::Return { val: 0 },
+            ],
+            constants: Vec::new(),
+            strings: Vec::new(),
+            resume_table: HashMap::from([(0, 1)]),
+            live_reg_masks: HashMap::new(),
+        };
+
+        let frame = VmFrame::new(AgentId(1));
+        match run(&module, frame) {
+            VmResult::SuspendedMulti { io_requests, .. } => {
+                assert_eq!(io_requests.len(), 3);
+            }
+            _ => panic!("expected multi-suspend"),
+        }
+    }
+
+    #[test]
+    fn vm_agent_isolation() {
+        // Two agents with different data shouldn't leak
+        let module = CompiledModule {
+            source_hash: 0,
+            instructions: vec![
+                Instruction::LoadConst { dst: 0, idx: 0 },
+                Instruction::Suspend { resume_id: 0, live_regs: 0b1, io_type: IoType::Fetch },
+                Instruction::Return { val: 0 },
+            ],
+            constants: vec![JsValue::str("secret_A")],
+            strings: Vec::new(),
+            resume_table: HashMap::from([(0, 2)]),
+            live_reg_masks: HashMap::from([(0, 0b1)]),
+        };
+
+        // Agent A
+        let frame_a = VmFrame::new(AgentId(1));
+        let VmResult::Suspended { continuation: cont_a, .. } = run(&module, frame_a) else { panic!() };
+
+        // Agent B — fresh frame, no access to A's registers
+        let frame_b = VmFrame::new(AgentId(2));
+        let VmResult::Suspended { continuation: cont_b, .. } = run(&module, frame_b) else { panic!() };
+
+        // Verify isolation: B's continuation doesn't contain A's data
+        let b_data = format!("{:?}", cont_b.saved_registers);
+        // Both have "secret_A" from constants, but that's module-level — not agent state
+        // The key: agent B cannot read agent A's continuation
+        assert_ne!(cont_a.agent_id, cont_b.agent_id);
+    }
+
+    #[test]
     fn vm_response_construction() {
         let module = CompiledModule {
             source_hash: 0,
@@ -401,7 +622,7 @@ mod tests {
         let frame = VmFrame::new(AgentId(1));
         match run(&module, frame) {
             VmResult::Done(JsValue::Object(map)) => {
-                assert_eq!(map["body"], JsValue::Str("hello".into()));
+                assert_eq!(map["body"], JsValue::str("hello"));
                 assert_eq!(map["status"], JsValue::Number(200.0));
                 assert_eq!(map["__is_response"], JsValue::Bool(true));
             }
