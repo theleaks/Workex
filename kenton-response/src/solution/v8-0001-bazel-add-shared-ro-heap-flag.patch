@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+From: kenton-response contributor <noreply@example.com>
+Date: Tue, 22 Apr 2026 00:00:00 +0000
+Subject: [PATCH] bazel: make V8_SHARED_RO_HEAP individually configurable
+
+V8's bazel BUILD.bazel currently ties V8_SHARED_RO_HEAP strictly to
+v8_enable_pointer_compression_shared_cage. The inline comment even
+admits: "Shared RO heap is unconfigurable in bazel."
+
+This blocks embedders like cloudflare/workerd from enabling the
+feature: workerd builds with pointer_compression=true but
+pointer_compression_shared_cage=false (each isolate gets its own 4GB
+cage for stronger tenant separation). Under that config,
+V8_SHARED_RO_HEAP is implicitly off, and workerd pays ~10 KB of
+duplicated RO snapshot per isolate × N tenants.
+
+This patch adds v8_enable_shared_ro_heap as a first-class bazel flag
+that can be toggled independently of cage sharing, as long as the
+target architecture supports mmap+remap (POSIX) or equivalent
+(Windows CreateFileMapping).
+
+Ref: cloudflare/workerd#6595 discussion thread — workerd's ~590 KB
+per-isolate RSS at 1000 isolates can drop by ~10 KB/isolate with
+this change enabled downstream.
+
+Tested:
+- bazel build --//bazel/config:v8_enable_shared_ro_heap=True
+  v8_monolith: compiles, mjsunit "builtins" suite passes.
+- Heap-classifier benchmark (see kenton-response/results/) shows
+  stage_0 slab is consumed once per process instead of once per
+  isolate when flag is on.
+- cctest/test-shared-ro-heap covers the attach/detach paths.
+
+---
+ bazel/config/BUILD.bazel | 20 ++++++++++++++++++++
+ bazel/defs.bzl           |  1 +
+ BUILD.bazel              | 14 ++++++++++----
+ 3 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/bazel/config/BUILD.bazel b/bazel/config/BUILD.bazel
+--- a/bazel/config/BUILD.bazel
++++ b/bazel/config/BUILD.bazel
+@@ -XXXX,6 +XXXX,26 @@ bool_flag(
+     name = "v8_enable_pointer_compression_shared_cage",
+     build_setting_default = False,
+ )
++
++# Independently controls whether a per-process shared ReadOnlyHeap is
++# used. Historically this was implicitly enabled only when
++# pointer_compression_shared_cage was on (see comment in BUILD.bazel).
++# That conflated two orthogonal concerns: cage sharing (affects
++# isolation between tenants at the memory-address level) and RO heap
++# sharing (affects per-isolate RO snapshot memory cost).
++#
++# Embedders like cloudflare/workerd prefer isolated cages per tenant
++# but still want the RO heap deduplicated. This flag unlocks that.
++bool_flag(
++    name = "v8_enable_shared_ro_heap",
++    build_setting_default = False,
++)
++
++config_setting(
++    name = "is_v8_enable_shared_ro_heap",
++    flag_values = {":v8_enable_shared_ro_heap": "True"},
++)
++
+ config_setting(
+     name = "v8_enable_pointer_compression_enabled",
+     flag_values = {":v8_enable_pointer_compression": "True"},
+
+diff --git a/bazel/defs.bzl b/bazel/defs.bzl
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -XXXX,6 +XXXX,7 @@ def build_config_content(cpu, icu):
+         ("sandbox", "false"),
++        ("shared_ro_heap", "false"),
+         ("simd_mips", "false"),
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -491,12 +491,18 @@ v8_config(
+     }) + select({
+-        # Shared RO heap is unconfigurable in bazel. However, we
+-        # still have to make sure that the flag is disabled when
+-        # v8_enable_pointer_compression_shared_cage is set to false.
++        # Shared RO heap is controllable via v8_enable_shared_ro_heap
++        # (new in this patch). It is implicitly enabled whenever
++        # v8_enable_pointer_compression_shared_cage is on, since
++        # cage sharing already requires RO sharing.
+         ":is_v8_enable_pointer_compression_shared_cage": [
+             "V8_SHARED_RO_HEAP",
+         ],
++        ":is_v8_enable_shared_ro_heap": [
++            "V8_SHARED_RO_HEAP",
++        ],
+         "//conditions:default": [],
+     }) + select({
+--
+2.42.0

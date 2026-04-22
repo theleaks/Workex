@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kenton-response <noreply@example.com>
+Date: Mon, 21 Apr 2026 00:00:00 +0000
+Subject: [PATCH] cow-builtins: add skeleton files for copy-on-write shared
+ built-ins (RFC)
+
+Skeleton patch: adds the new files required by the COW-builtins RFC.
+Does NOT modify existing V8 source — those hook locations are listed
+in hooks_reference.md. This diff applies cleanly against any V8 tree
+because all edits are additive.
+
+Files added:
+  - src/heap/cow-shared-builtins.h   (class declaration)
+  - src/heap/cow-shared-builtins.cc  (stubs + mmap slab + flag gate)
+
+After applying, the new class compiles but PromoteOnWrite is
+UNIMPLEMENTED() — by design. See hooks_reference.md for the three
+hook edits in existing files that would activate the feature.
+
+---
+ src/heap/cow-shared-builtins.cc |  89 ++++++++++++++++++++++++++++++
+ src/heap/cow-shared-builtins.h  |  78 +++++++++++++++++++++++++
+ 2 files changed, 167 insertions(+)
+ create mode 100644 src/heap/cow-shared-builtins.cc
+ create mode 100644 src/heap/cow-shared-builtins.h
+
+diff --git a/src/heap/cow-shared-builtins.h b/src/heap/cow-shared-builtins.h
+new file mode 100644
+index 0000000..0000001
+--- /dev/null
++++ b/src/heap/cow-shared-builtins.h
+@@ -0,0 +1,78 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Copy-on-write shared built-ins. See the RFC at
++// cloudflare/workerd#6595-response/src/v8-cow/RFC.md for the design.
++
++#ifndef V8_HEAP_COW_SHARED_BUILTINS_H_
++#define V8_HEAP_COW_SHARED_BUILTINS_H_
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++
++#include "src/base/platform/mutex.h"
++#include "src/common/globals.h"
++
++namespace v8 {
++namespace internal {
++
++class Isolate;
++class HeapObject;
++
++// Process-wide shared read-only slab containing the deserialized
++// built-in objects. Initialized once at first isolate creation (or
++// explicitly via CowSharedBuiltins::EnsureInitialized()).
++class CowSharedBuiltins {
++ public:
++  // Call once per process before any isolate runs. Idempotent — second
++  // call is a no-op.
++  static void EnsureInitialized();
++
++  // After EnsureInitialized, returns the base of the shared slab.
++  static Address base();
++  static size_t size();
++
++  // Called by ReadOnlyHeap::SetUp when --shared-readonly-builtins is set:
++  // redirects the isolate's read-only root pointers into the shared slab
++  // instead of allocating a per-isolate RO space.
++  //
++  // COW-TODO: implement root rewiring. This is the load-bearing piece —
++  // the pointer layout of the shared slab must match what the root
++  // table expects, which means the slab serialisation format must be
++  // identical to today's snapshot format for the objects it contains.
++  static void WireIsolateRoots(Isolate* isolate);
++
++  // Called from the write barrier when a store into an RO-shared
++  // object is detected. Promotes the object into the isolate's regular
++  // mutable heap and returns the promoted address.
++  //
++  // COW-TODO: implement. Requires:
++  //   1. Shallow-copy the object into the isolate's new-space (or old?).
++  //   2. Walk in-object pointer slots and re-sign any compressed pointers.
++  //   3. Register the promotion in a per-isolate id->address map so that
++  //      any other root-table entry referring to the same shared object
++  //      is updated on lookup.
++  //   4. Return promoted address. Caller rewrites the field.
++  static Address PromoteOnWrite(Isolate* isolate, HeapObject shared_object);
++
++  // For tests and the memory benchmark.
++  static size_t promotion_count_for_isolate(Isolate* isolate);
++
++ private:
++  CowSharedBuiltins() = delete;
++
++  static void MapSlabReadOnly();
++  static void PopulateFromSnapshot();
++
++  static std::atomic<bool> initialized_;
++  static Address slab_base_;
++  static size_t slab_size_;
++  static v8::base::Mutex init_mutex_;
++};
++
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_HEAP_COW_SHARED_BUILTINS_H_
+diff --git a/src/heap/cow-shared-builtins.cc b/src/heap/cow-shared-builtins.cc
+new file mode 100644
+index 0000000..0000002
+--- /dev/null
++++ b/src/heap/cow-shared-builtins.cc
+@@ -0,0 +1,89 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/heap/cow-shared-builtins.h"
++
++#include "src/base/platform/mutex.h"
++#include "src/common/globals.h"
++#include "src/flags/flags.h"
++
++#ifdef V8_OS_POSIX
++#include <sys/mman.h>
++#endif
++
++namespace v8 {
++namespace internal {
++
++std::atomic<bool> CowSharedBuiltins::initialized_{false};
++Address CowSharedBuiltins::slab_base_ = kNullAddress;
++size_t CowSharedBuiltins::slab_size_ = 0;
++v8::base::Mutex CowSharedBuiltins::init_mutex_;
++
++void CowSharedBuiltins::EnsureInitialized() {
++  if (initialized_.load(std::memory_order_acquire)) return;
++  v8::base::MutexGuard guard(&init_mutex_);
++  if (initialized_.load(std::memory_order_relaxed)) return;
++
++  MapSlabReadOnly();
++  PopulateFromSnapshot();
++
++  // COW-TODO: mprotect PROT_READ after PopulateFromSnapshot. Must happen
++  // strictly after population; otherwise deserialisation faults.
++
++  initialized_.store(true, std::memory_order_release);
++}
++
++void CowSharedBuiltins::MapSlabReadOnly() {
++  // COW-TODO: decide slab size from snapshot metadata. 16 MB is a
++  // placeholder upper bound that covers the 30 top-level built-ins
++  // plus slack. Must fit inside the sandbox cage if V8_ENABLE_SANDBOX.
++  slab_size_ = 16 * 1024 * 1024;
++
++#ifdef V8_OS_POSIX
++  void* p = mmap(nullptr, slab_size_, PROT_READ | PROT_WRITE,
++                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  if (p == MAP_FAILED) {
++    FATAL("CowSharedBuiltins: mmap failed");
++  }
++  slab_base_ = reinterpret_cast<Address>(p);
++#else
++  // COW-TODO: Windows implementation via VirtualAlloc.
++  UNREACHABLE();
++#endif
++}
++
++void CowSharedBuiltins::PopulateFromSnapshot() {
++  // COW-TODO: deserialise the RO portion of the startup snapshot into the
++  // slab. Cannot use Deserializer<Isolate>::DeserializeIntoHeap directly;
++  // need a slab-targeted variant that writes to slab_base_ rather than
++  // the isolate's RO space.
++}
++
++void CowSharedBuiltins::WireIsolateRoots(Isolate* isolate) {
++  USE(isolate);
++  if (!v8_flags.shared_readonly_builtins) return;
++  EnsureInitialized();
++  // COW-TODO: for each root in Roots::read_only_roots_, replace the
++  // pointer with the corresponding offset into slab_base_.
++}
++
++Address CowSharedBuiltins::PromoteOnWrite(Isolate* isolate,
++                                          HeapObject shared_object) {
++  USE(isolate);
++  USE(shared_object);
++  // COW-TODO: implement. See header for algorithm.
++  UNIMPLEMENTED();
++}
++
++size_t CowSharedBuiltins::promotion_count_for_isolate(Isolate* isolate) {
++  USE(isolate);
++  // COW-TODO: return from per-isolate bookkeeping.
++  return 0;
++}
++
++Address CowSharedBuiltins::base() { return slab_base_; }
++size_t CowSharedBuiltins::size() { return slab_size_; }
++
++}  // namespace internal
++}  // namespace v8
+--
+2.42.0

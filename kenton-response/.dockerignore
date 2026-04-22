@@ -1,0 +1,10 @@
+vendor/
+build/
+results/
+*.exe
+*.obj
+*.log
+*.pdb
+_syntax_check.bat
+_compile_test.bat
+_self_test*

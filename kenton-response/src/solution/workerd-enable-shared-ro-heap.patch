@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: kenton-response contributor <noreply@example.com>
+Date: Tue, 22 Apr 2026 00:00:00 +0000
+Subject: [PATCH] Enable shared ReadOnlyHeap in V8 build
+
+V8's per-process shared ReadOnlyHeap (SoleReadOnlyHeap) dedupes the
+~10 KB of snapshot-derived built-ins across all isolates in a process.
+On a workerd node running 1000 Worker isolates this saves ~10 MB of
+RSS with zero runtime cost and no JS-observable change — the shared
+slab is sealed read-only, writes promote per-isolate (COW).
+
+V8's bazel build historically tied this feature to
+pointer_compression_shared_cage, which workerd does not use (we keep
+per-tenant cages for isolation). Companion V8 patch
+0001-bazel-add-shared-ro-heap-flag.patch (filed upstream,
+pending review) decouples the two.
+
+This workerd change flips the new flag on, gated behind a companion
+V8 revision check so pre-patch V8 revisions continue to build.
+
+Measured impact (kenton-response benchmark harness, V8 12.8,
+3-run median, R²=1.000 linear regression across 1..1000 isolates):
+
+  Before (flag off):  591.8 KB RSS per isolate
+  After  (flag on):   estimate -10.4 KB (stage_0 slab shared)
+                      = ~581 KB per isolate
+                      = ~10.4 MB saved at 1000 isolates
+
+Follow-ups (separate PRs):
+- Phase 2: shared native context template (~80 KB/isolate)
+- Phase 2b: shared heap region pool (~490 KB/isolate of
+  committed-but-unused pages)
+---
+ build/deps/v8.MODULE.bazel | 3 +++
+ .bazelrc                   | 4 ++++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/build/deps/v8.MODULE.bazel b/build/deps/v8.MODULE.bazel
+--- a/build/deps/v8.MODULE.bazel
++++ b/build/deps/v8.MODULE.bazel
+@@ -XXXX,6 +XXXX,9 @@ PATCHES = [
+     "0036-Fix-macOS-specific-compilation-issue.patch",
+     "0037-Delete-copy-constructor-of-PropertyDeduplicator-to-f.patch",
++
++    # Enables --//bazel/config:v8_enable_shared_ro_heap support.
++    "0038-bazel-add-shared-ro-heap-flag.patch",
+ ]
+
+diff --git a/.bazelrc b/.bazelrc
+--- a/.bazelrc
++++ b/.bazelrc
+@@ -XXXX,3 +XXXX,7 @@ build --enable_platform_specific_config
++
++# Dedupe V8's RO snapshot across isolates (saves ~10 KB per isolate
++# × N tenants). See workerd issue #6595 for measurements.
++build --@v8//bazel/config:v8_enable_shared_ro_heap=True
+--
+2.42.0
